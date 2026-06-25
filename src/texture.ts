@@ -1,3 +1,5 @@
+import bundledPresetFile from '../data/texture-presets.json';
+
 export type TextureSymbol = 'circle' | 'square' | 'diamond' | 'plus' | 'star' | 'chars';
 export type TextureSpotType = 'gaussian' | 'wave' | 'cellular' | 'ripple' | 'streak';
 export type TextureAnimType = 'drift' | 'breathe' | 'vortex' | 'wave' | 'float';
@@ -120,6 +122,9 @@ export interface TexturePresetFile {
   selectedId: string | null;
   presets: TexturePreset[];
 }
+
+const PRESET_STORAGE_KEY = 'dynamic-textures.presets.v1';
+const PRESET_ENDPOINT = `${import.meta.env.BASE_URL}__texture/presets`;
 
 const HALFTONE_DEFAULTS: TextureSettings = {
   textureType: 'halftone',
@@ -443,19 +448,54 @@ export function sanitizePresetFile(raw: unknown): TexturePresetFile {
   return { selectedId, presets };
 }
 
+function withBundledPresetFallback(file: TexturePresetFile): TexturePresetFile {
+  if (file.presets.length > 0) return file;
+  return sanitizePresetFile(bundledPresetFile);
+}
+
+function readPresetStorage(): TexturePresetFile {
+  const bundled = sanitizePresetFile(bundledPresetFile);
+  if (typeof window === 'undefined') return bundled;
+  try {
+    const raw = window.localStorage.getItem(PRESET_STORAGE_KEY);
+    if (!raw) return bundled;
+    return withBundledPresetFallback(sanitizePresetFile(JSON.parse(raw)));
+  } catch {
+    return bundled;
+  }
+}
+
+function writePresetStorage(file: TexturePresetFile): TexturePresetFile {
+  const clean = sanitizePresetFile(file);
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(clean));
+  }
+  return clean;
+}
+
 export async function readPresetFile(): Promise<TexturePresetFile> {
-  const res = await fetch('/__texture/presets', { cache: 'no-store' });
-  if (!res.ok) throw new Error(await res.text());
-  return sanitizePresetFile(await res.json().catch(() => ({})));
+  try {
+    const res = await fetch(PRESET_ENDPOINT, { cache: 'no-store' });
+    if (!res.ok) throw new Error(await res.text());
+    const file = withBundledPresetFallback(sanitizePresetFile(await res.json().catch(() => ({}))));
+    return writePresetStorage(file);
+  } catch {
+    return readPresetStorage();
+  }
 }
 
 export async function writePresetFile(file: TexturePresetFile): Promise<TexturePresetFile> {
   const clean = sanitizePresetFile(file);
-  const res = await fetch('/__texture/presets', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(clean),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return sanitizePresetFile(await res.json().catch(() => clean));
+  try {
+    const res = await fetch(PRESET_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(clean),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const saved = sanitizePresetFile(await res.json().catch(() => clean));
+    return writePresetStorage(saved);
+  } catch {
+    return writePresetStorage(clean);
+  }
 }

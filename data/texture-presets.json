@@ -3,7 +3,7 @@
   "presets": [
     {
       "id": "texture-1782381734937",
-      "name": "纹理预设 1",
+      "name": "蓝绿渐变",
       "settings": {
         "textureType": "halftone",
         "enabled": true,
@@ -306,7 +306,7 @@
         "selectedLayerId": "layer-1782380118725-thnbib"
       },
       "createdAt": "2026-06-25T10:02:06.233Z",
-      "updatedAt": "2026-06-25T10:02:06.233Z"
+      "updatedAt": "2026-06-25T10:44:17.562Z"
     },
     {
       "id": "texture-1782382273361",
