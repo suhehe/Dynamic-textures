@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as
 import { ColorInput } from './components/ColorInput';
 import { DynamicTextureCanvas, type DynamicTextureCanvasHandle } from './components/DynamicTextureCanvas';
 import { drawLayerStackWebGL, type WebGLCompositeLayer } from './webglComposite';
+import eyeIcon from './assets/eye.svg';
+import eyeClosedIcon from './assets/eye_close.svg';
 import {
   TEXTURE_DEFAULTS,
   getTextureDefaults,
@@ -38,6 +40,7 @@ type NumberKey = Extract<keyof TextureSettings,
 >;
 
 const STORAGE_KEY = 'dynamic-textures.current.v1';
+const CANVAS_STATUS_SPACE = 32;
 
 type TextureLayerBlendMode =
   | 'pass-through'
@@ -64,6 +67,7 @@ interface TextureLayer {
   kind: 'texture';
   id: string;
   name: string;
+  visible: boolean;
   settings: TextureSettings;
   blendMode: TextureLayerBlendMode;
 }
@@ -72,6 +76,7 @@ interface FilterLayer {
   kind: 'filter';
   id: string;
   name: string;
+  visible: boolean;
   filter: SmudgeDistortionFilter;
 }
 
@@ -93,41 +98,59 @@ function reorderTextureLayerToIndex(layers: Layer[], fromId: string, toIndex: nu
   return nextLayers;
 }
 
-const BLEND_MODE_GROUPS: Array<Array<{ value: TextureLayerBlendMode; label: string }>> = [
-  [
-    { value: 'pass-through', label: '穿透' },
-    { value: 'normal', label: '正常' },
-  ],
-  [
-    { value: 'darken', label: '变暗' },
-    { value: 'multiply', label: '正片叠底' },
-    { value: 'plus-darker', label: '加深' },
-    { value: 'color-burn', label: '颜色加深' },
-  ],
-  [
-    { value: 'lighten', label: '变亮' },
-    { value: 'screen', label: '滤色' },
-    { value: 'plus-lighter', label: '加亮' },
-    { value: 'color-dodge', label: '颜色减淡' },
-  ],
-  [
-    { value: 'overlay', label: '叠加' },
-    { value: 'soft-light', label: '柔光' },
-    { value: 'hard-light', label: '强光' },
-  ],
-  [
-    { value: 'difference', label: '差值' },
-    { value: 'exclusion', label: '排除' },
-  ],
-  [
-    { value: 'hue', label: '色相' },
-    { value: 'saturation', label: '饱和度' },
-    { value: 'color', label: '颜色' },
-    { value: 'luminosity', label: '明度' },
-  ],
+const BLEND_MODE_GROUPS: Array<{ title: string; options: Array<{ value: TextureLayerBlendMode; label: string }> }> = [
+  {
+    title: '基础',
+    options: [
+      { value: 'pass-through', label: '穿透' },
+      { value: 'normal', label: '正常' },
+    ],
+  },
+  {
+    title: '变暗',
+    options: [
+      { value: 'darken', label: '变暗' },
+      { value: 'multiply', label: '正片叠底' },
+      { value: 'plus-darker', label: '加深' },
+      { value: 'color-burn', label: '颜色加深' },
+    ],
+  },
+  {
+    title: '变亮',
+    options: [
+      { value: 'lighten', label: '变亮' },
+      { value: 'screen', label: '滤色' },
+      { value: 'plus-lighter', label: '加亮' },
+      { value: 'color-dodge', label: '颜色减淡' },
+    ],
+  },
+  {
+    title: '叠加',
+    options: [
+      { value: 'overlay', label: '叠加' },
+      { value: 'soft-light', label: '柔光' },
+      { value: 'hard-light', label: '强光' },
+    ],
+  },
+  {
+    title: '差值',
+    options: [
+      { value: 'difference', label: '差值' },
+      { value: 'exclusion', label: '排除' },
+    ],
+  },
+  {
+    title: '颜色',
+    options: [
+      { value: 'hue', label: '色相' },
+      { value: 'saturation', label: '饱和度' },
+      { value: 'color', label: '颜色' },
+      { value: 'luminosity', label: '明度' },
+    ],
+  },
 ];
 
-const BLEND_MODE_LABELS = new Map(BLEND_MODE_GROUPS.flat().map(option => [option.value, option.label]));
+const BLEND_MODE_LABELS = new Map(BLEND_MODE_GROUPS.flatMap(group => group.options).map(option => [option.value, option.label]));
 const FLOW_DEFAULT_STOPS: GradientColorStop[] = [
   { position: 0, color: '#7B2FF7', opacity: 1 },
   { position: 0.34, color: '#2B86FF', opacity: 1 },
@@ -140,6 +163,7 @@ function createTextureLayer(index: number, settings: TextureSettings = TEXTURE_D
     kind: 'texture',
     id: `layer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: `图层${index}`,
+    visible: true,
     settings: sanitizeTextureSettings(settings),
     blendMode: 'normal',
   };
@@ -150,9 +174,11 @@ function createSmudgeFilterLayer(index: number): FilterLayer {
     kind: 'filter',
     id: `filter-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: `涂抹畸变${index}`,
+    visible: true,
     filter: sanitizeSmudgeDistortionFilter({
       enabled: true,
       strength: 1,
+      precision: 2,
       brushEnabled: true,
       brushSize: 80,
       brushStrength: 0.45,
@@ -173,14 +199,16 @@ function sanitizeTextureLayerState(raw: unknown): TextureLayerState {
     const layers = rawLayers
       .map((item, index) => {
         if (!item || typeof item !== 'object') return null;
-        const layer = item as Partial<Layer> & { settings?: unknown; blendMode?: unknown; filter?: unknown; kind?: unknown };
+        const layer = item as Partial<Layer> & { settings?: unknown; blendMode?: unknown; filter?: unknown; kind?: unknown; visible?: unknown };
         const id = typeof layer.id === 'string' && layer.id.trim() ? layer.id.trim() : `layer-${index + 1}`;
         const name = typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `图层${index + 1}`;
+        const visible = layer.visible !== false;
         if (layer.kind === 'filter') {
           return {
             kind: 'filter',
             id,
             name,
+            visible,
             filter: sanitizeSmudgeDistortionFilter(layer.filter),
           };
         }
@@ -188,6 +216,7 @@ function sanitizeTextureLayerState(raw: unknown): TextureLayerState {
           kind: 'texture',
           id,
           name,
+          visible,
           settings: sanitizeTextureSettings(layer.settings),
           blendMode: sanitizeBlendMode(layer.blendMode),
         };
@@ -288,6 +317,14 @@ function pointDistance(a: SmudgeDistortionPoint, b: SmudgeDistortionPoint, width
   return Math.hypot((a.x - b.x) * width, (a.y - b.y) * height);
 }
 
+function textureNeedsContinuousComposite(settings: TextureSettings) {
+  if (!settings.enabled) return false;
+  if (settings.textureType === 'gradient') {
+    return settings.animEnabled !== false && settings.gradientAnimType === 'flow';
+  }
+  return settings.animEnabled !== false || settings.activationEnabled;
+}
+
 function getTextureSourceCanvas(
   output: HTMLCanvasElement,
   layerId: string,
@@ -308,14 +345,15 @@ function drawLayerStack(
   width: number,
   height: number,
 ) {
+  const visibleLayers = layers.filter(layer => layer.visible !== false);
   const textureSourceCanvases = new Map<string, HTMLCanvasElement>();
-  for (const layer of layers) {
+  for (const layer of visibleLayers) {
     if (layer.kind !== 'texture') continue;
     const source = getTextureSourceCanvas(output, layer.id, layerCanvases);
     if (!source || source.width !== width || source.height !== height) continue;
     textureSourceCanvases.set(layer.id, source);
   }
-  const hasTextureLayer = layers.some(layer => layer.kind === 'texture');
+  const hasTextureLayer = visibleLayers.some(layer => layer.kind === 'texture');
   if (hasTextureLayer && textureSourceCanvases.size === 0) {
     if (import.meta.env.DEV) {
       console.warn('Composite skipped: no ready texture source canvas.');
@@ -323,7 +361,7 @@ function drawLayerStack(
     return;
   }
 
-  const webglLayers: WebGLCompositeLayer[] = layers.map(layer => {
+  const webglLayers: WebGLCompositeLayer[] = visibleLayers.map(layer => {
     if (layer.kind === 'texture') {
       return {
         kind: 'texture',
@@ -338,7 +376,7 @@ function drawLayerStack(
       filter: layer.filter,
     };
   });
-  const hasActiveSmudgeFilter = layers.some(layer => (
+  const hasActiveSmudgeFilter = visibleLayers.some(layer => (
     layer.kind === 'filter' &&
     layer.filter.enabled &&
     layer.filter.strength > 0 &&
@@ -353,7 +391,7 @@ function drawLayerStack(
   outputCtx.setTransform(1, 0, 0, 1, 0, 0);
   outputCtx.clearRect(0, 0, width, height);
 
-  const drawOrder = [...layers].reverse();
+  const drawOrder = [...visibleLayers].reverse();
   let hasDrawnLayer = false;
   for (const layer of drawOrder) {
     if (layer.kind === 'texture') {
@@ -383,12 +421,15 @@ function applySmudgeDistortion(
   const src = source.data;
   const dst = output.data;
   const maxDim = Math.max(width, height);
-  const dxField = new Float32Array(width * height);
-  const dyField = new Float32Array(width * height);
+  const precision = Math.max(1, Math.min(4, Math.round(filter.precision)));
+  const fieldWidth = width * precision;
+  const fieldHeight = height * precision;
+  const dxField = new Float32Array(fieldWidth * fieldHeight);
+  const dyField = new Float32Array(fieldWidth * fieldHeight);
 
   for (const stroke of filter.strokes) {
-    const radius = Math.max(2, stroke.brushSize / 2);
-    const feather = Math.max(0, stroke.brushFeather);
+    const radius = Math.max(2, stroke.brushSize / 2) * precision;
+    const feather = Math.max(0, stroke.brushFeather) * precision;
     const spread = radius + feather;
     const inner = Math.max(0, radius - feather);
     const force = stroke.brushStrength * filter.strength * 0.34;
@@ -397,14 +438,16 @@ function applySmudgeDistortion(
     for (let i = 1; i < stroke.points.length; i += 1) {
       const prev = stroke.points[i - 1];
       const next = stroke.points[i];
-      const px = prev.x * width;
-      const py = prev.y * height;
-      const nx = next.x * width;
-      const ny = next.y * height;
+      const px = prev.x * fieldWidth;
+      const py = prev.y * fieldHeight;
+      const nx = next.x * fieldWidth;
+      const ny = next.y * fieldHeight;
       const moveX = nx - px;
       const moveY = ny - py;
+      const sourceMoveX = (next.x - prev.x) * width;
+      const sourceMoveY = (next.y - prev.y) * height;
       const distance = Math.hypot(moveX, moveY);
-      if (distance < 0.25) continue;
+      if (distance < 0.25 * precision) continue;
       const step = Math.max(2, spread * 0.28);
       const steps = Math.max(1, Math.ceil(distance / step));
       for (let s = 0; s <= steps; s += 1) {
@@ -412,35 +455,72 @@ function applySmudgeDistortion(
         const cx = px + moveX * t;
         const cy = py + moveY * t;
         const minX = Math.max(0, Math.floor(cx - spread));
-        const maxX = Math.min(width - 1, Math.ceil(cx + spread));
+        const maxX = Math.min(fieldWidth - 1, Math.ceil(cx + spread));
         const minY = Math.max(0, Math.floor(cy - spread));
-        const maxY = Math.min(height - 1, Math.ceil(cy + spread));
+        const maxY = Math.min(fieldHeight - 1, Math.ceil(cy + spread));
         for (let y = minY; y <= maxY; y += 1) {
           for (let x = minX; x <= maxX; x += 1) {
             const dist = Math.hypot(x - cx, y - cy);
             if (dist > spread) continue;
             const featherT = feather <= 0 ? 1 : clamp((spread - dist) / Math.max(1, spread - inner), 0, 1);
             const coreT = dist <= inner ? 1 : featherT * featherT * (3 - 2 * featherT);
-            const idx = y * width + x;
-            dxField[idx] += (moveX / maxDim) * force * coreT;
-            dyField[idx] += (moveY / maxDim) * force * coreT;
+            const idx = y * fieldWidth + x;
+            dxField[idx] += (sourceMoveX / maxDim) * force * coreT;
+            dyField[idx] += (sourceMoveY / maxDim) * force * coreT;
           }
         }
       }
     }
   }
 
+  const sampleField = (field: Float32Array, x: number, y: number) => {
+    const fx = clamp(((x + 0.5) / width) * fieldWidth - 0.5, 0, fieldWidth - 1);
+    const fy = clamp(((y + 0.5) / height) * fieldHeight - 0.5, 0, fieldHeight - 1);
+    const x0 = Math.floor(fx);
+    const y0 = Math.floor(fy);
+    const x1 = Math.min(fieldWidth - 1, x0 + 1);
+    const y1 = Math.min(fieldHeight - 1, y0 + 1);
+    const tx = fx - x0;
+    const ty = fy - y0;
+    const i00 = y0 * fieldWidth + x0;
+    const i10 = y0 * fieldWidth + x1;
+    const i01 = y1 * fieldWidth + x0;
+    const i11 = y1 * fieldWidth + x1;
+    const top = field[i00] * (1 - tx) + field[i10] * tx;
+    const bottom = field[i01] * (1 - tx) + field[i11] * tx;
+    return top * (1 - ty) + bottom * ty;
+  };
+
+  const sampleSource = (x: number, y: number, channel: number) => {
+    const sx = clamp(x, 0, width - 1);
+    const sy = clamp(y, 0, height - 1);
+    const x0 = Math.floor(sx);
+    const y0 = Math.floor(sy);
+    const x1 = Math.min(width - 1, x0 + 1);
+    const y1 = Math.min(height - 1, y0 + 1);
+    const tx = sx - x0;
+    const ty = sy - y0;
+    const i00 = (y0 * width + x0) * 4 + channel;
+    const i10 = (y0 * width + x1) * 4 + channel;
+    const i01 = (y1 * width + x0) * 4 + channel;
+    const i11 = (y1 * width + x1) * 4 + channel;
+    const top = src[i00] * (1 - tx) + src[i10] * tx;
+    const bottom = src[i01] * (1 - tx) + src[i11] * tx;
+    return Math.round(top * (1 - ty) + bottom * ty);
+  };
+
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const idx = y * width + x;
-      const sx = clamp(Math.round(x - dxField[idx] * maxDim), 0, width - 1);
-      const sy = clamp(Math.round(y - dyField[idx] * maxDim), 0, height - 1);
-      const srcIdx = (sy * width + sx) * 4;
+      const dx = sampleField(dxField, x, y);
+      const dy = sampleField(dyField, x, y);
+      const sx = x - dx * maxDim;
+      const sy = y - dy * maxDim;
       const dstIdx = idx * 4;
-      dst[dstIdx] = src[srcIdx];
-      dst[dstIdx + 1] = src[srcIdx + 1];
-      dst[dstIdx + 2] = src[srcIdx + 2];
-      dst[dstIdx + 3] = src[srcIdx + 3];
+      dst[dstIdx] = sampleSource(sx, sy, 0);
+      dst[dstIdx + 1] = sampleSource(sx, sy, 1);
+      dst[dstIdx + 2] = sampleSource(sx, sy, 2);
+      dst[dstIdx + 3] = sampleSource(sx, sy, 3);
     }
   }
 
@@ -566,12 +646,11 @@ export default function App() {
   const [layerState, setLayerState] = useState<TextureLayerState>(() => loadLocalLayerState());
   const [presets, setPresets] = useState<TexturePreset[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [blendMenuLayerId, setBlendMenuLayerId] = useState<string | null>(null);
   const [draggingLayerId, setDraggingLayerId] = useState<string | null>(null);
-  const [canvasWidth, setCanvasWidth] = useState(840);
-  const [canvasHeight, setCanvasHeight] = useState(472);
-  const [canvasWidthInput, setCanvasWidthInput] = useState('840');
-  const [canvasHeightInput, setCanvasHeightInput] = useState('472');
+  const [canvasWidth, setCanvasWidth] = useState(1920);
+  const [canvasHeight, setCanvasHeight] = useState(1080);
+  const [canvasWidthInput, setCanvasWidthInput] = useState('1920');
+  const [canvasHeightInput, setCanvasHeightInput] = useState('1080');
   const layerCanvasRefs = useRef<Record<string, DynamicTextureCanvasHandle | null>>({});
   const compositeCanvasRef = useRef<HTMLCanvasElement>(null);
   const smudgeBrushPreviewRef = useRef<HTMLDivElement>(null);
@@ -585,7 +664,10 @@ export default function App() {
   const compositeFrameRef = useRef(0);
   const compositeNeedsFollowupRef = useRef(false);
   const lastCompositeSignatureRef = useRef('');
+  const pendingProcessingCommitRef = useRef(false);
+  const processingCommitTimeoutRef = useRef(0);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  const [processingTask, setProcessingTask] = useState<string | null>(null);
   const selectedLayer = useMemo(
     () => layerState.layers.find(layer => layer.id === layerState.selectedLayerId) ?? layerState.layers[0],
     [layerState.layers, layerState.selectedLayerId],
@@ -642,6 +724,10 @@ export default function App() {
     [presets, selectedId],
   );
   const serializedLayerState = useMemo(() => serializeTextureLayerState(layerState), [layerState]);
+  const hasContinuousComposite = useMemo(
+    () => layerState.layers.some(layer => layer.kind === 'texture' && layer.visible !== false && textureNeedsContinuousComposite(layer.settings)),
+    [layerState.layers],
+  );
   const serializedSelectedPresetState = useMemo(
     () => selectedPreset ? serializeTextureLayerState(sanitizeTextureLayerState(selectedPreset.layerState)) : null,
     [selectedPreset],
@@ -649,7 +735,8 @@ export default function App() {
   const hasUnsavedChanges = selectedPreset !== null && serializedLayerState !== serializedSelectedPresetState;
   const previewScale = useMemo(() => {
     if (stageSize.width <= 0 || stageSize.height <= 0) return 1;
-    return Math.min(stageSize.width / canvasWidth, stageSize.height / canvasHeight, 1);
+    const availableHeight = Math.max(1, stageSize.height - CANVAS_STATUS_SPACE);
+    return Math.min(stageSize.width / canvasWidth, availableHeight / canvasHeight, 1);
   }, [stageSize, canvasWidth, canvasHeight]);
   const previewWidth = Math.max(1, Math.round(canvasWidth * previewScale));
   const previewHeight = Math.max(1, Math.round(canvasHeight * previewScale));
@@ -665,18 +752,26 @@ export default function App() {
     const canvas = compositeCanvasRef.current;
     if (!canvas) return;
     const sourceVersions = layerState.layers.map(layer => {
-      if (layer.kind === 'filter') return `${layer.id}:filter`;
-      return `${layer.id}:${layerCanvasRefs.current[layer.id]?.getFrameVersion() ?? 0}`;
+      if (layer.kind === 'filter') return `${layer.id}:filter:${layer.visible}`;
+      return `${layer.id}:${layer.visible}:${layerCanvasRefs.current[layer.id]?.getFrameVersion() ?? 0}`;
     }).join('|');
     const signature = `${canvasWidth}x${canvasHeight}:${serializedLayerState}:${sourceVersions}`;
     if (signature === lastCompositeSignatureRef.current) return;
-    drawLayerStack(canvas, layerState.layers, layerCanvasRefs.current, canvasWidth, canvasHeight);
-    const hasReadyTextureLayer = layerState.layers.some(layer => (
-      layer.kind === 'texture' &&
-      (layerCanvasRefs.current[layer.id]?.getFrameVersion() ?? 0) > 0
-    ));
-    if (hasReadyTextureLayer) {
-      lastCompositeSignatureRef.current = signature;
+    try {
+      drawLayerStack(canvas, layerState.layers, layerCanvasRefs.current, canvasWidth, canvasHeight);
+      const hasReadyTextureLayer = layerState.layers.some(layer => (
+        layer.kind === 'texture' &&
+        layer.visible !== false &&
+        (layerCanvasRefs.current[layer.id]?.getFrameVersion() ?? 0) > 0
+      ));
+      const hasVisibleTextureLayer = layerState.layers.some(layer => layer.kind === 'texture' && layer.visible !== false);
+      if (hasReadyTextureLayer || !hasVisibleTextureLayer) {
+        lastCompositeSignatureRef.current = signature;
+      }
+    } finally {
+      if (!pendingProcessingCommitRef.current) {
+        setProcessingTask(null);
+      }
     }
   }, [canvasHeight, canvasWidth, layerState.layers, serializedLayerState]);
 
@@ -709,8 +804,22 @@ export default function App() {
   }, [drawComposite, requestCompositeDraw]);
 
   useEffect(() => {
+    if (!hasContinuousComposite) return;
+    let frame = 0;
+    const tick = () => {
+      drawComposite();
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(frame);
+    };
+  }, [drawComposite, hasContinuousComposite]);
+
+  useEffect(() => {
     return () => {
       if (compositeFrameRef.current) cancelAnimationFrame(compositeFrameRef.current);
+      if (processingCommitTimeoutRef.current) window.clearTimeout(processingCommitTimeoutRef.current);
     };
   }, []);
 
@@ -768,7 +877,7 @@ export default function App() {
   };
 
   const filterRange = (
-    key: Extract<keyof SmudgeDistortionFilter, 'strength' | 'brushSize' | 'brushStrength' | 'brushFeather'>,
+    key: Extract<keyof SmudgeDistortionFilter, 'strength' | 'precision' | 'brushSize' | 'brushStrength' | 'brushFeather'>,
     label: string,
     min: number,
     max: number,
@@ -874,7 +983,6 @@ export default function App() {
         selectedLayerId: nextLayer.id,
       };
     });
-    setBlendMenuLayerId(null);
   };
 
   const addFilterLayer = () => {
@@ -885,17 +993,16 @@ export default function App() {
         selectedLayerId: nextLayer.id,
       };
     });
-    setBlendMenuLayerId(null);
   };
 
-  const updateLayer = (id: string, patch: Partial<Pick<TextureLayer, 'name' | 'blendMode' | 'settings'>>) => {
+  const updateLayer = (id: string, patch: Partial<Pick<TextureLayer, 'name' | 'visible' | 'blendMode' | 'settings'>>) => {
     setLayerState(prev => ({
       ...prev,
       layers: prev.layers.map(layer => layer.id === id && layer.kind === 'texture' ? { ...layer, ...patch } : layer),
     }));
   };
 
-  const updateFilterLayer = (id: string, patch: Partial<Pick<FilterLayer, 'name' | 'filter'>>) => {
+  const updateFilterLayer = (id: string, patch: Partial<Pick<FilterLayer, 'name' | 'visible' | 'filter'>>) => {
     setLayerState(prev => ({
       ...prev,
       layers: prev.layers.map(layer => layer.id === id && layer.kind === 'filter' ? { ...layer, ...patch } : layer),
@@ -914,7 +1021,6 @@ export default function App() {
     });
     delete layerCanvasRefs.current[id];
     delete layerRowRefs.current[id];
-    setBlendMenuLayerId(current => current === id ? null : current);
     setDraggingLayerId(current => current === id ? null : current);
   };
 
@@ -946,7 +1052,6 @@ export default function App() {
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
     setLayerState(prev => ({ ...prev, selectedLayerId: layerId }));
-    setBlendMenuLayerId(null);
     setDraggingLayerId(layerId);
   };
 
@@ -1049,13 +1154,19 @@ export default function App() {
     smudgeStrokeRef.current = null;
     lastSmudgePointRef.current = null;
     if (!stroke || stroke.points.length < 2) return;
-    setLayerState(prev => updateSelectedFilter(prev, layer => ({
-      ...layer,
-      filter: sanitizeSmudgeDistortionFilter({
-        ...layer.filter,
-        strokes: [...layer.filter.strokes, stroke].slice(-80),
-      }),
-    })));
+    pendingProcessingCommitRef.current = true;
+    setProcessingTask('涂抹畸变');
+    processingCommitTimeoutRef.current = window.setTimeout(() => {
+      pendingProcessingCommitRef.current = false;
+      processingCommitTimeoutRef.current = 0;
+      setLayerState(prev => updateSelectedFilter(prev, layer => ({
+        ...layer,
+        filter: sanitizeSmudgeDistortionFilter({
+          ...layer.filter,
+          strokes: [...layer.filter.strokes, stroke].slice(-80),
+        }),
+      })));
+    }, 30);
   };
 
   const beginSmudgeStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1155,6 +1266,9 @@ export default function App() {
               <div ref={smudgeBrushPreviewInnerRef} />
             </div>
           </div>
+          <div className="canvas-processing-status" aria-live="polite">
+            {processingTask ? `正在处理：${processingTask}` : '\u00a0'}
+          </div>
         </div>
       </section>
 
@@ -1196,7 +1310,7 @@ export default function App() {
           <div className="texture-layer-list">
             {layerState.layers.map(layer => (
               <div
-                className={`texture-layer-row ${layer.kind === 'filter' ? 'filter-layer-row' : ''} ${layer.id === layerState.selectedLayerId ? 'active' : ''} ${layer.id === draggingLayerId ? 'dragging' : ''}`}
+                className={`texture-layer-row ${layer.kind === 'filter' ? 'filter-layer-row' : ''} ${layer.visible === false ? 'hidden-layer' : ''} ${layer.id === layerState.selectedLayerId ? 'active' : ''} ${layer.id === draggingLayerId ? 'dragging' : ''}`}
                 key={layer.id}
                 ref={node => { layerRowRefs.current[layer.id] = node; }}
                 onClick={() => setLayerState(prev => ({ ...prev, selectedLayerId: layer.id }))}
@@ -1219,52 +1333,35 @@ export default function App() {
                   }}
                   onClick={event => event.stopPropagation()}
                 />
-                {layer.kind === 'texture' ? <div className="blend-menu-wrap">
-                  <button
-                    type="button"
-                    className="blend-menu-button"
-                    onClick={event => {
-                      event.stopPropagation();
-                      setLayerState(prev => ({ ...prev, selectedLayerId: layer.id }));
-                      setBlendMenuLayerId(current => current === layer.id ? null : layer.id);
-                    }}
-                  >
-                    {BLEND_MODE_LABELS.get(layer.blendMode) ?? '正常'}
-                  </button>
-                  {blendMenuLayerId === layer.id ? (
-                    <div className="blend-menu" onClick={event => event.stopPropagation()}>
-                      {BLEND_MODE_GROUPS.map((group, groupIndex) => (
-                        <div className="blend-menu-group" key={groupIndex}>
-                          {group.map(option => (
-                            <button
-                              type="button"
-                              className={option.value === layer.blendMode ? 'selected' : ''}
-                              key={option.value}
-                              onClick={() => {
-                                updateLayer(layer.id, { blendMode: option.value });
-                                setBlendMenuLayerId(null);
-                              }}
-                            >
-                              <span>{option.value === layer.blendMode ? '✓' : ''}</span>
-                              {option.label}
-                            </button>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </div> : <span className="filter-layer-type">涂抹畸变</span>}
                 {layer.kind === 'texture' ? <select
-                  value={layer.settings.textureType}
-                  onChange={event => {
-                    const textureType = event.currentTarget.value as TextureType;
-                    updateLayer(layer.id, { settings: getTextureDefaults(textureType) });
-                  }}
+                  className="blend-mode-select"
+                  value={layer.blendMode}
+                  onChange={event => updateLayer(layer.id, { blendMode: event.currentTarget.value as TextureLayerBlendMode })}
                   onClick={event => event.stopPropagation()}
                 >
-                  <option value="halftone">半调点阵</option>
-                  <option value="gradient">渐变背景</option>
-                </select> : <span className="filter-layer-scope">作用下方</span>}
+                  {BLEND_MODE_GROUPS.map(group => (
+                    <optgroup key={group.title} label={group.title}>
+                      {group.options.map(option => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select> : null}
+                <button
+                  type="button"
+                  className="layer-visibility-button"
+                  aria-label={layer.visible === false ? '显示图层' : '隐藏图层'}
+                  aria-pressed={layer.visible !== false}
+                  onClick={event => {
+                    event.stopPropagation();
+                    if (layer.kind === 'filter') updateFilterLayer(layer.id, { visible: layer.visible === false });
+                    else updateLayer(layer.id, { visible: layer.visible === false });
+                  }}
+                >
+                  <img src={layer.visible === false ? eyeClosedIcon : eyeIcon} alt="" aria-hidden="true" />
+                </button>
                 <button
                   type="button"
                   className="layer-delete-button"
@@ -1282,7 +1379,30 @@ export default function App() {
           </div>
         </PanelGroup>
 
+        <PanelGroup title="图层类型">
+          {isTextureLayerSelected ? <label className="input-row selected-layer-type-row">
+            <span>纹理类型</span>
+            <select
+              value={settings.textureType}
+              onChange={event => {
+                const textureType = event.currentTarget.value as TextureType;
+                replaceSettings(getTextureDefaults(textureType));
+              }}
+            >
+              <option value="halftone">半调点阵</option>
+              <option value="gradient">渐变背景</option>
+            </select>
+          </label> : null}
+          {isFilterLayerSelected && filterSettings ? <label className="input-row selected-layer-type-row">
+            <span>滤镜类型</span>
+            <select value="smudgeDistortion" onChange={() => undefined}>
+              <option value="smudgeDistortion">涂抹畸变</option>
+            </select>
+          </label> : null}
+        </PanelGroup>
+
         {isTextureLayerSelected ? <>
+
         <PanelGroup title="动画参数">
           <label className="check-row"><span>启用动画</span><input type="checkbox" checked={settings.animEnabled !== false} onChange={event => updateSettings({ animEnabled: event.currentTarget.checked })} /></label>
           {isHalftoneTexture ? <>
@@ -1416,6 +1536,7 @@ export default function App() {
           <PanelGroup title="滤镜参数">
             <label className="check-row"><span>启用滤镜</span><input type="checkbox" checked={filterSettings.enabled} onChange={event => updateSelectedFilterSettings({ enabled: event.currentTarget.checked })} /></label>
             {filterRange('strength', '滤镜强度', 0, 1, 0.01, value => value.toFixed(2))}
+            {filterRange('precision', '精度', 1, 4, 1, value => `${Math.round(value)}x`)}
           </PanelGroup>
         </> : null}
       </aside>

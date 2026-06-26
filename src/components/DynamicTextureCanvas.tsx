@@ -435,6 +435,7 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
   const flowGLInitRef = useRef<boolean>(false);
   const animationTimeRef = useRef<number>(0);
   const lastWallNowRef = useRef<number>(0);
+  const wasAnimationRunningRef = useRef(false);
   settingsRef.current = settings;
   onFrameRef.current = onFrame;
 
@@ -729,13 +730,18 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
       syncBrushPreview(lastHoverPointRef.current);
       ctx.clearRect(0, 0, width, height);
       if (!current.enabled || width <= 0 || height <= 0) {
+        lastWallNowRef.current = now;
+        wasAnimationRunningRef.current = false;
         return;
       }
 
-      if (current.animEnabled !== false) {
-        animationTimeRef.current += now - lastWallNowRef.current;
+      const isAnimationRunning = current.animEnabled !== false;
+      if (isAnimationRunning) {
+        const elapsed = wasAnimationRunningRef.current ? now - lastWallNowRef.current : 0;
+        animationTimeRef.current += Math.max(0, elapsed);
       }
       lastWallNowRef.current = now;
+      wasAnimationRunningRef.current = isAnimationRunning;
       const effectiveNow = animationTimeRef.current;
       const isGradientTexture = current.textureType === 'gradient';
       const isHalftoneTexture = current.textureType === 'halftone';

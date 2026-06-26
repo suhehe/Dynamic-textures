@@ -33,6 +33,7 @@ type FramebufferTarget = {
 type DisplacementCache = {
   key: string;
   texture: WebGLTexture;
+  range: number;
 };
 
 type Renderer = {
@@ -123,14 +124,17 @@ void main() {
 }`;
 
 const SMUDGE_FRAG_SRC = `
-precision mediump float;
+precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_tex;
 uniform sampler2D u_disp;
 uniform vec2 u_size;
+uniform float u_dispRange;
 void main() {
-  vec2 disp = texture2D(u_disp, v_uv).rg * 2.0 - 1.0;
-  vec2 sampleUv = clamp(v_uv - disp * max(u_size.x, u_size.y) / u_size, vec2(0.0), vec2(1.0));
+  vec2 dispUv = vec2(v_uv.x, 1.0 - v_uv.y);
+  vec2 disp = (texture2D(u_disp, dispUv).rg * 2.0 - 1.0) * u_dispRange;
+  vec2 dispUvOffset = vec2(disp.x, -disp.y) * max(u_size.x, u_size.y) / u_size;
+  vec2 sampleUv = clamp(v_uv - dispUvOffset, vec2(0.0), vec2(1.0));
   gl_FragColor = texture2D(u_tex, sampleUv);
 }`;
 
@@ -274,7 +278,7 @@ function drawCopy(renderer: Renderer, input: WebGLTexture, output: WebGLFramebuf
 function uploadCanvas(renderer: Renderer, canvas: HTMLCanvasElement) {
   const { gl, sourceTexture } = renderer;
   gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
   return sourceTexture;
 }
@@ -315,7 +319,7 @@ function blendModeToUniform(mode: BlendMode) {
 }
 
 function smudgeKey(filter: SmudgeDistortionFilter, width: number, height: number) {
-  return `${width}x${height}:${filter.strength}:${filter.strokes.map(stroke => (
+  return `${width}x${height}:${filter.strength}:${filter.precision}:${filter.strokes.map(stroke => (
     `${stroke.brushSize},${stroke.brushStrength},${stroke.brushFeather}:` +
     stroke.points.map(point => `${point.x.toFixed(4)},${point.y.toFixed(4)}`).join(';')
   )).join('|')}`;
@@ -326,12 +330,15 @@ function addStrokeToField(
   filterStrength: number,
   width: number,
   height: number,
+  precision: number,
   dxField: Float32Array,
   dyField: Float32Array,
 ) {
+  const fieldWidth = width * precision;
+  const fieldHeight = height * precision;
   const maxDim = Math.max(width, height);
-  const radius = Math.max(2, stroke.brushSize / 2);
-  const feather = Math.max(0, stroke.brushFeather);
+  const radius = Math.max(2, stroke.brushSize / 2) * precision;
+  const feather = Math.max(0, stroke.brushFeather) * precision;
   const spread = radius + feather;
   const inner = Math.max(0, radius - feather);
   const force = stroke.brushStrength * filterStrength * 0.34;
@@ -340,14 +347,16 @@ function addStrokeToField(
   for (let i = 1; i < stroke.points.length; i += 1) {
     const prev = stroke.points[i - 1];
     const next = stroke.points[i];
-    const px = prev.x * width;
-    const py = prev.y * height;
-    const nx = next.x * width;
-    const ny = next.y * height;
+    const px = prev.x * fieldWidth;
+    const py = prev.y * fieldHeight;
+    const nx = next.x * fieldWidth;
+    const ny = next.y * fieldHeight;
     const moveX = nx - px;
     const moveY = ny - py;
+    const sourceMoveX = (next.x - prev.x) * width;
+    const sourceMoveY = (next.y - prev.y) * height;
     const distance = Math.hypot(moveX, moveY);
-    if (distance < 0.25) continue;
+    if (distance < 0.25 * precision) continue;
     const step = Math.max(2, spread * 0.28);
     const steps = Math.max(1, Math.ceil(distance / step));
     for (let s = 0; s <= steps; s += 1) {
@@ -355,18 +364,18 @@ function addStrokeToField(
       const cx = px + moveX * t;
       const cy = py + moveY * t;
       const minX = Math.max(0, Math.floor(cx - spread));
-      const maxX = Math.min(width - 1, Math.ceil(cx + spread));
+      const maxX = Math.min(fieldWidth - 1, Math.ceil(cx + spread));
       const minY = Math.max(0, Math.floor(cy - spread));
-      const maxY = Math.min(height - 1, Math.ceil(cy + spread));
+      const maxY = Math.min(fieldHeight - 1, Math.ceil(cy + spread));
       for (let y = minY; y <= maxY; y += 1) {
         for (let x = minX; x <= maxX; x += 1) {
           const dist = Math.hypot(x - cx, y - cy);
           if (dist > spread) continue;
           const featherT = feather <= 0 ? 1 : clamp((spread - dist) / Math.max(1, spread - inner), 0, 1);
           const coreT = dist <= inner ? 1 : featherT * featherT * (3 - 2 * featherT);
-          const idx = y * width + x;
-          dxField[idx] += (moveX / maxDim) * force * coreT;
-          dyField[idx] += (moveY / maxDim) * force * coreT;
+          const idx = y * fieldWidth + x;
+          dxField[idx] += (sourceMoveX / maxDim) * force * coreT;
+          dyField[idx] += (sourceMoveY / maxDim) * force * coreT;
         }
       }
     }
@@ -376,28 +385,41 @@ function addStrokeToField(
 function getDisplacementTexture(renderer: Renderer, filterId: string, filter: SmudgeDistortionFilter, width: number, height: number) {
   const key = smudgeKey(filter, width, height);
   const cached = renderer.displacementCache.get(filterId);
-  if (cached && cached.key === key) return cached.texture;
+  if (cached && cached.key === key) return cached;
 
   const { gl } = renderer;
   const texture = cached?.texture ?? createTexture(gl);
   if (!texture) return null;
-  const dxField = new Float32Array(width * height);
-  const dyField = new Float32Array(width * height);
+  const precision = Math.max(1, Math.min(4, Math.round(filter.precision)));
+  const fieldWidth = width * precision;
+  const fieldHeight = height * precision;
+  const fieldSize = fieldWidth * fieldHeight;
+  const dxField = new Float32Array(fieldSize);
+  const dyField = new Float32Array(fieldSize);
   for (const stroke of filter.strokes) {
-    addStrokeToField(stroke, filter.strength, width, height, dxField, dyField);
+    addStrokeToField(stroke, filter.strength, width, height, precision, dxField, dyField);
   }
-  const data = new Uint8Array(width * height * 4);
-  for (let i = 0; i < width * height; i += 1) {
+
+  let range = 0;
+  for (let i = 0; i < fieldSize; i += 1) {
+    range = Math.max(range, Math.abs(dxField[i]), Math.abs(dyField[i]));
+  }
+  range = Math.max(1 / 255, Math.min(1, range));
+
+  const data = new Uint8Array(fieldSize * 4);
+  for (let i = 0; i < fieldSize; i += 1) {
     const idx = i * 4;
-    data[idx] = Math.round((clamp(dxField[i], -1, 1) * 0.5 + 0.5) * 255);
-    data[idx + 1] = Math.round((clamp(dyField[i], -1, 1) * 0.5 + 0.5) * 255);
+    data[idx] = Math.round((clamp(dxField[i], -range, range) / range * 0.5 + 0.5) * 255);
+    data[idx + 1] = Math.round((clamp(dyField[i], -range, range) / range * 0.5 + 0.5) * 255);
     data[idx + 2] = 128;
     data[idx + 3] = 255;
   }
   gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
-  renderer.displacementCache.set(filterId, { key, texture });
-  return texture;
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fieldWidth, fieldHeight, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  const nextCache = { key, texture, range };
+  renderer.displacementCache.set(filterId, nextCache);
+  return nextCache;
 }
 
 function drawBlend(
@@ -427,6 +449,7 @@ function drawSmudge(
   renderer: Renderer,
   input: WebGLTexture,
   displacement: WebGLTexture,
+  displacementRange: number,
   output: WebGLFramebuffer,
   width: number,
   height: number,
@@ -442,6 +465,7 @@ function drawSmudge(
   gl.bindTexture(gl.TEXTURE_2D, displacement);
   gl.uniform1i(gl.getUniformLocation(smudgeProgram, 'u_disp'), 1);
   gl.uniform2f(gl.getUniformLocation(smudgeProgram, 'u_size'), width, height);
+  gl.uniform1f(gl.getUniformLocation(smudgeProgram, 'u_dispRange'), displacementRange);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
@@ -492,7 +516,7 @@ export function drawLayerStackWebGL(
       if (!hasDrawnLayer || !layer.filter.enabled || layer.filter.strength <= 0 || layer.filter.strokes.length === 0) continue;
       const displacement = getDisplacementTexture(renderer, layer.id, layer.filter, width, height);
       if (!displacement) return false;
-      drawSmudge(renderer, targets[currentTarget].texture, displacement, targets[scratchTarget].framebuffer, width, height);
+      drawSmudge(renderer, targets[currentTarget].texture, displacement.texture, displacement.range, targets[scratchTarget].framebuffer, width, height);
       [currentTarget, scratchTarget] = [scratchTarget, currentTarget];
     }
 

@@ -415,6 +415,7 @@
               "type": "smudgeDistortion",
               "enabled": true,
               "strength": 1,
+              "precision": 2,
               "brushEnabled": false,
               "brushSize": 80,
               "brushStrength": 0.45,

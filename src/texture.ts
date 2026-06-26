@@ -122,6 +122,7 @@ export interface SmudgeDistortionFilter {
   type: 'smudgeDistortion';
   enabled: boolean;
   strength: number;
+  precision: number;
   brushEnabled: boolean;
   brushSize: number;
   brushStrength: number;
@@ -133,6 +134,7 @@ export interface TexturePresetTextureLayer {
   id: string;
   kind: 'texture';
   name: string;
+  visible: boolean;
   settings: TextureSettings;
   blendMode: string;
 }
@@ -141,6 +143,7 @@ export interface TexturePresetFilterLayer {
   id: string;
   kind: 'filter';
   name: string;
+  visible: boolean;
   filter: SmudgeDistortionFilter;
 }
 
@@ -347,6 +350,7 @@ export function sanitizeSmudgeDistortionFilter(raw: unknown): SmudgeDistortionFi
     type: 'smudgeDistortion',
     enabled: typeof input.enabled === 'boolean' ? input.enabled : true,
     strength: clampSetting(input.strength, 0, 1, 1),
+    precision: Math.round(clampSetting(input.precision, 1, 4, 2)),
     brushEnabled: typeof input.brushEnabled === 'boolean' ? input.brushEnabled : true,
     brushSize: clampSetting(input.brushSize, 4, 400, 80),
     brushStrength: clampSetting(input.brushStrength, 0, 1, 0.45),
@@ -467,14 +471,16 @@ export function sanitizePresetLayerState(raw: unknown): TexturePresetLayerState 
     const layers = (input.layers ?? [])
       .map((item, index) => {
         if (!item || typeof item !== 'object') return null;
-        const layer = item as Partial<TexturePresetLayer> & { settings?: unknown; blendMode?: unknown; filter?: unknown; kind?: unknown };
+        const layer = item as Partial<TexturePresetLayer> & { settings?: unknown; blendMode?: unknown; filter?: unknown; kind?: unknown; visible?: unknown };
         const id = typeof layer.id === 'string' && layer.id.trim() ? layer.id.trim() : `layer-${index + 1}`;
         const name = typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `图层${index + 1}`;
+        const visible = layer.visible !== false;
         if (layer.kind === 'filter') {
           return {
             id,
             kind: 'filter',
             name,
+            visible,
             filter: sanitizeSmudgeDistortionFilter(layer.filter),
           };
         }
@@ -482,6 +488,7 @@ export function sanitizePresetLayerState(raw: unknown): TexturePresetLayerState 
           id,
           kind: 'texture',
           name,
+          visible,
           settings: sanitizeTextureSettings(layer.settings),
           blendMode: typeof layer.blendMode === 'string' && layer.blendMode.trim() ? layer.blendMode.trim() : 'normal',
         };
@@ -500,6 +507,7 @@ export function sanitizePresetLayerState(raw: unknown): TexturePresetLayerState 
     id: 'layer-1',
     kind: 'texture',
     name: '图层1',
+    visible: true,
     settings,
     blendMode: 'normal',
   };
