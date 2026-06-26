@@ -298,9 +298,19 @@ type MaskSnapshot = {
 };
 
 export type DynamicTextureCanvasHandle = {
-  canvas: HTMLCanvasElement | null;
+  getCanvas: () => HTMLCanvasElement | null;
   undoMask: () => void;
   resetMask: () => void;
+  getFrameVersion: () => number;
+};
+
+type DynamicTextureCanvasProps = {
+  settings: TextureSettings;
+  width: number;
+  height: number;
+  layerId?: string;
+  onFrame?: () => void;
+  renderScale?: number;
 };
 
 function createFlowGL(): FlowGL | null {
@@ -389,11 +399,26 @@ function renderFlowGL(
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
-export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, { settings: TextureSettings; width: number; height: number }>(function DynamicTextureCanvas({ settings, width: outputWidth, height: outputHeight }, ref) {
+function needsContinuousDraw(settings: TextureSettings, activeInteractionCount: number) {
+  if (!settings.enabled) return false;
+  if (settings.textureType === 'gradient') {
+    return settings.animEnabled !== false && settings.gradientAnimType === 'flow';
+  }
+  return (
+    settings.animEnabled !== false ||
+    settings.activationEnabled ||
+    activeInteractionCount > 0
+  );
+}
+
+export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, DynamicTextureCanvasProps>(function DynamicTextureCanvas({ settings, width: outputWidth, height: outputHeight, layerId, onFrame, renderScale = 1 }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const brushPreviewRef = useRef<HTMLDivElement>(null);
   const brushPreviewInnerRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef(settings);
+  const onFrameRef = useRef(onFrame);
+  const frameVersionRef = useRef(0);
+  const requestDrawRef = useRef<() => void>(() => {});
   const interactionsRef = useRef<Array<{ x: number; y: number; start: number }>>([]);
   const lastInteractionRef = useRef({ x: -9999, y: -9999, at: 0 });
   const tmpCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -411,6 +436,7 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, { set
   const animationTimeRef = useRef<number>(0);
   const lastWallNowRef = useRef<number>(0);
   settingsRef.current = settings;
+  onFrameRef.current = onFrame;
 
   const ensureSpotMaskCanvas = (width = maskCanvasSizeRef.current.width, height = maskCanvasSizeRef.current.height) => {
     if (width <= 0 || height <= 0) return null;
@@ -488,7 +514,7 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, { set
   };
 
   useImperativeHandle(ref, () => ({
-    canvas: canvasRef.current,
+    getCanvas: () => canvasRef.current,
     undoMask: undoSpotMask,
     resetMask: () => {
       maskPaintingRef.current = false;
@@ -496,6 +522,7 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, { set
       pushSpotMaskHistory();
       resetSpotMask();
     },
+    getFrameVersion: () => frameVersionRef.current,
   }), []);
 
   useEffect(() => {
@@ -505,20 +532,26 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, { set
     if (!canvas || !parent || !ctx) return;
 
     let animationFrame = 0;
-    let width = Math.max(1, Math.round(outputWidth));
-    let height = Math.max(1, Math.round(outputHeight));
+    let width = Math.max(1, Math.round(outputWidth * renderScale));
+    let height = Math.max(1, Math.round(outputHeight * renderScale));
+    const scheduleDraw = () => {
+      if (animationFrame) return;
+      animationFrame = requestAnimationFrame(draw);
+    };
+    requestDrawRef.current = scheduleDraw;
     const initialNow = performance.now();
     animationTimeRef.current = initialNow;
     lastWallNowRef.current = initialNow;
     const resize = () => {
-      width = Math.max(1, Math.round(outputWidth));
-      height = Math.max(1, Math.round(outputHeight));
+      width = Math.max(1, Math.round(outputWidth * renderScale));
+      height = Math.max(1, Math.round(outputHeight * renderScale));
       canvas.width = width;
       canvas.height = height;
       canvas.style.width = '100%';
       canvas.style.height = '100%';
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       maskCanvasSizeRef.current = { width, height };
+      scheduleDraw();
     };
 
     const sampleSpotMask = (x: number, y: number) => {
@@ -686,15 +719,16 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, { set
         ...interactionsRef.current.filter(item => now - item.start < interactionDuration),
         { x, y, start: now },
       ].slice(-28);
+      scheduleDraw();
     };
 
     const draw = (now: number) => {
+      animationFrame = 0;
       const current = settingsRef.current;
       ensureSpotMaskCanvas();
       syncBrushPreview(lastHoverPointRef.current);
       ctx.clearRect(0, 0, width, height);
       if (!current.enabled || width <= 0 || height <= 0) {
-        animationFrame = requestAnimationFrame(draw);
         return;
       }
 
@@ -1186,7 +1220,11 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, { set
         ctx.restore();
       }
       ctx.globalAlpha = 1;
-      animationFrame = requestAnimationFrame(draw);
+      frameVersionRef.current += 1;
+      onFrameRef.current?.();
+      if (needsContinuousDraw(current, interactionsRef.current.length)) {
+        scheduleDraw();
+      }
     };
 
     resize();
@@ -1199,7 +1237,7 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, { set
     window.addEventListener('pointerup', onMaskPointerUp);
     window.addEventListener('pointercancel', onMaskPointerUp);
     window.addEventListener('pointermove', onPointerMove, { passive: true });
-    animationFrame = requestAnimationFrame(draw);
+    scheduleDraw();
     return () => {
       observer.disconnect();
       canvas.removeEventListener('pointerdown', onMaskPointerDown);
@@ -1215,14 +1253,20 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, { set
         flowGLRef.current = null;
         flowGLInitRef.current = false;
       }
+      requestDrawRef.current = () => {};
     };
-  }, [outputHeight, outputWidth]);
+  }, [outputHeight, outputWidth, renderScale]);
+
+  useEffect(() => {
+    requestDrawRef.current();
+  }, [settings]);
 
   return (
     <>
       <canvas
         ref={canvasRef}
         data-wps-home-bg-canvas
+        data-texture-layer-id={layerId}
         style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', display: 'block', cursor: settings.spotMaskEnabled ? 'none' : 'default', touchAction: settings.spotMaskEnabled ? 'none' : 'auto' }}
       />
       <div

@@ -1,13 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { ColorInput } from './components/ColorInput';
 import { DynamicTextureCanvas, type DynamicTextureCanvasHandle } from './components/DynamicTextureCanvas';
+import { drawLayerStackWebGL, type WebGLCompositeLayer } from './webglComposite';
 import {
   TEXTURE_DEFAULTS,
   getTextureDefaults,
   readPresetFile,
+  sanitizeSmudgeDistortionFilter,
   sanitizeTextureSettings,
   writePresetFile,
   type GradientColorStop,
+  type SmudgeDistortionFilter,
+  type SmudgeDistortionPoint,
+  type SmudgeDistortionStroke,
   type TextureActivationType,
   type TextureAnimType,
   type TextureGradientAnimType,
@@ -56,18 +61,28 @@ type TextureLayerBlendMode =
   | 'luminosity';
 
 interface TextureLayer {
+  kind: 'texture';
   id: string;
   name: string;
   settings: TextureSettings;
   blendMode: TextureLayerBlendMode;
 }
 
+interface FilterLayer {
+  kind: 'filter';
+  id: string;
+  name: string;
+  filter: SmudgeDistortionFilter;
+}
+
+type Layer = TextureLayer | FilterLayer;
+
 interface TextureLayerState {
-  layers: TextureLayer[];
+  layers: Layer[];
   selectedLayerId: string;
 }
 
-function reorderTextureLayerToIndex(layers: TextureLayer[], fromId: string, toIndex: number) {
+function reorderTextureLayerToIndex(layers: Layer[], fromId: string, toIndex: number) {
   const fromIndex = layers.findIndex(layer => layer.id === fromId);
   if (fromIndex < 0) return layers;
   const nextLayers = [...layers];
@@ -122,10 +137,28 @@ const FLOW_DEFAULT_STOPS: GradientColorStop[] = [
 
 function createTextureLayer(index: number, settings: TextureSettings = TEXTURE_DEFAULTS): TextureLayer {
   return {
+    kind: 'texture',
     id: `layer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: `图层${index}`,
     settings: sanitizeTextureSettings(settings),
     blendMode: 'normal',
+  };
+}
+
+function createSmudgeFilterLayer(index: number): FilterLayer {
+  return {
+    kind: 'filter',
+    id: `filter-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: `涂抹畸变${index}`,
+    filter: sanitizeSmudgeDistortionFilter({
+      enabled: true,
+      strength: 1,
+      brushEnabled: true,
+      brushSize: 80,
+      brushStrength: 0.45,
+      brushFeather: 48,
+      strokes: [],
+    }),
   };
 }
 
@@ -140,15 +173,26 @@ function sanitizeTextureLayerState(raw: unknown): TextureLayerState {
     const layers = rawLayers
       .map((item, index) => {
         if (!item || typeof item !== 'object') return null;
-        const layer = item as Partial<TextureLayer>;
+        const layer = item as Partial<Layer> & { settings?: unknown; blendMode?: unknown; filter?: unknown; kind?: unknown };
+        const id = typeof layer.id === 'string' && layer.id.trim() ? layer.id.trim() : `layer-${index + 1}`;
+        const name = typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `图层${index + 1}`;
+        if (layer.kind === 'filter') {
+          return {
+            kind: 'filter',
+            id,
+            name,
+            filter: sanitizeSmudgeDistortionFilter(layer.filter),
+          };
+        }
         return {
-          id: typeof layer.id === 'string' && layer.id.trim() ? layer.id.trim() : `layer-${index + 1}`,
-          name: typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `图层${index + 1}`,
+          kind: 'texture',
+          id,
+          name,
           settings: sanitizeTextureSettings(layer.settings),
           blendMode: sanitizeBlendMode(layer.blendMode),
         };
       })
-      .filter((item): item is TextureLayer => item !== null);
+      .filter((item): item is Layer => item !== null);
     if (layers.length > 0) {
       const selectedLayerId = typeof input.selectedLayerId === 'string' && layers.some(layer => layer.id === input.selectedLayerId)
         ? input.selectedLayerId
@@ -173,7 +217,14 @@ function loadLocalLayerState() {
 function updateSelectedLayer(layerState: TextureLayerState, update: (layer: TextureLayer) => TextureLayer): TextureLayerState {
   return {
     ...layerState,
-    layers: layerState.layers.map(layer => layer.id === layerState.selectedLayerId ? update(layer) : layer),
+    layers: layerState.layers.map(layer => layer.id === layerState.selectedLayerId && layer.kind === 'texture' ? update(layer) : layer),
+  };
+}
+
+function updateSelectedFilter(layerState: TextureLayerState, update: (layer: FilterLayer) => FilterLayer): TextureLayerState {
+  return {
+    ...layerState,
+    layers: layerState.layers.map(layer => layer.id === layerState.selectedLayerId && layer.kind === 'filter' ? update(layer) : layer),
   };
 }
 
@@ -205,6 +256,10 @@ function areTextureLayerStatesEqual(a: TextureLayerState, b: TextureLayerState) 
   return JSON.stringify(sanitizeTextureLayerState(a)) === JSON.stringify(sanitizeTextureLayerState(b));
 }
 
+function serializeTextureLayerState(value: TextureLayerState) {
+  return JSON.stringify(sanitizeTextureLayerState(value));
+}
+
 function createPresetFromLayerState(
   id: string,
   name: string,
@@ -213,11 +268,12 @@ function createPresetFromLayerState(
   updatedAt: string,
 ): TexturePreset {
   const cleanLayerState = sanitizeTextureLayerState(layerState);
-  const selectedLayer = cleanLayerState.layers.find(layer => layer.id === cleanLayerState.selectedLayerId) ?? cleanLayerState.layers[0];
+  const selectedLayer = cleanLayerState.layers.find((layer): layer is TextureLayer => layer.id === cleanLayerState.selectedLayerId && layer.kind === 'texture');
+  const firstTextureLayer = cleanLayerState.layers.find((layer): layer is TextureLayer => layer.kind === 'texture');
   return {
     id,
     name,
-    settings: selectedLayer.settings,
+    settings: (selectedLayer ?? firstTextureLayer)?.settings ?? TEXTURE_DEFAULTS,
     layerState: cleanLayerState,
     createdAt,
     updatedAt,
@@ -226,6 +282,169 @@ function createPresetFromLayerState(
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function pointDistance(a: SmudgeDistortionPoint, b: SmudgeDistortionPoint, width: number, height: number) {
+  return Math.hypot((a.x - b.x) * width, (a.y - b.y) * height);
+}
+
+function getTextureSourceCanvas(
+  output: HTMLCanvasElement,
+  layerId: string,
+  layerCanvases: Record<string, DynamicTextureCanvasHandle | null>,
+) {
+  const refCanvas = layerCanvases[layerId]?.getCanvas() ?? null;
+  if (refCanvas) return refCanvas;
+  const host = output.parentElement;
+  if (!host) return null;
+  return Array.from(host.querySelectorAll<HTMLCanvasElement>('canvas[data-texture-layer-id]'))
+    .find(canvas => canvas.dataset.textureLayerId === layerId) ?? null;
+}
+
+function drawLayerStack(
+  output: HTMLCanvasElement,
+  layers: Layer[],
+  layerCanvases: Record<string, DynamicTextureCanvasHandle | null>,
+  width: number,
+  height: number,
+) {
+  const textureSourceCanvases = new Map<string, HTMLCanvasElement>();
+  for (const layer of layers) {
+    if (layer.kind !== 'texture') continue;
+    const source = getTextureSourceCanvas(output, layer.id, layerCanvases);
+    if (!source || source.width !== width || source.height !== height) continue;
+    textureSourceCanvases.set(layer.id, source);
+  }
+  const hasTextureLayer = layers.some(layer => layer.kind === 'texture');
+  if (hasTextureLayer && textureSourceCanvases.size === 0) {
+    if (import.meta.env.DEV) {
+      console.warn('Composite skipped: no ready texture source canvas.');
+    }
+    return;
+  }
+
+  const webglLayers: WebGLCompositeLayer[] = layers.map(layer => {
+    if (layer.kind === 'texture') {
+      return {
+        kind: 'texture',
+        id: layer.id,
+        blendMode: layer.blendMode,
+        canvas: textureSourceCanvases.get(layer.id) ?? null,
+      };
+    }
+    return {
+      kind: 'filter',
+      id: layer.id,
+      filter: layer.filter,
+    };
+  });
+  const hasActiveSmudgeFilter = layers.some(layer => (
+    layer.kind === 'filter' &&
+    layer.filter.enabled &&
+    layer.filter.strength > 0 &&
+    layer.filter.strokes.length > 0
+  ));
+  if (hasActiveSmudgeFilter && drawLayerStackWebGL(output, webglLayers, width, height)) return;
+
+  const outputCtx = output.getContext('2d', { willReadFrequently: true });
+  if (!outputCtx || width <= 0 || height <= 0) return;
+  if (output.width !== width) output.width = width;
+  if (output.height !== height) output.height = height;
+  outputCtx.setTransform(1, 0, 0, 1, 0, 0);
+  outputCtx.clearRect(0, 0, width, height);
+
+  const drawOrder = [...layers].reverse();
+  let hasDrawnLayer = false;
+  for (const layer of drawOrder) {
+    if (layer.kind === 'texture') {
+      const source = textureSourceCanvases.get(layer.id);
+      if (!source) continue;
+      outputCtx.globalCompositeOperation = hasDrawnLayer ? layerBlendToCanvas(layer.blendMode) : 'source-over';
+      outputCtx.drawImage(source, 0, 0, width, height);
+      hasDrawnLayer = true;
+      continue;
+    }
+
+    if (!hasDrawnLayer || !layer.filter.enabled || layer.filter.strength <= 0 || layer.filter.strokes.length === 0) continue;
+    applySmudgeDistortion(outputCtx, width, height, layer.filter);
+  }
+  outputCtx.globalCompositeOperation = 'source-over';
+  outputCtx.globalAlpha = 1;
+}
+
+function applySmudgeDistortion(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  filter: SmudgeDistortionFilter,
+) {
+  const source = ctx.getImageData(0, 0, width, height);
+  const output = ctx.createImageData(width, height);
+  const src = source.data;
+  const dst = output.data;
+  const maxDim = Math.max(width, height);
+  const dxField = new Float32Array(width * height);
+  const dyField = new Float32Array(width * height);
+
+  for (const stroke of filter.strokes) {
+    const radius = Math.max(2, stroke.brushSize / 2);
+    const feather = Math.max(0, stroke.brushFeather);
+    const spread = radius + feather;
+    const inner = Math.max(0, radius - feather);
+    const force = stroke.brushStrength * filter.strength * 0.34;
+    if (force <= 0 || spread <= 0) continue;
+
+    for (let i = 1; i < stroke.points.length; i += 1) {
+      const prev = stroke.points[i - 1];
+      const next = stroke.points[i];
+      const px = prev.x * width;
+      const py = prev.y * height;
+      const nx = next.x * width;
+      const ny = next.y * height;
+      const moveX = nx - px;
+      const moveY = ny - py;
+      const distance = Math.hypot(moveX, moveY);
+      if (distance < 0.25) continue;
+      const step = Math.max(2, spread * 0.28);
+      const steps = Math.max(1, Math.ceil(distance / step));
+      for (let s = 0; s <= steps; s += 1) {
+        const t = s / steps;
+        const cx = px + moveX * t;
+        const cy = py + moveY * t;
+        const minX = Math.max(0, Math.floor(cx - spread));
+        const maxX = Math.min(width - 1, Math.ceil(cx + spread));
+        const minY = Math.max(0, Math.floor(cy - spread));
+        const maxY = Math.min(height - 1, Math.ceil(cy + spread));
+        for (let y = minY; y <= maxY; y += 1) {
+          for (let x = minX; x <= maxX; x += 1) {
+            const dist = Math.hypot(x - cx, y - cy);
+            if (dist > spread) continue;
+            const featherT = feather <= 0 ? 1 : clamp((spread - dist) / Math.max(1, spread - inner), 0, 1);
+            const coreT = dist <= inner ? 1 : featherT * featherT * (3 - 2 * featherT);
+            const idx = y * width + x;
+            dxField[idx] += (moveX / maxDim) * force * coreT;
+            dyField[idx] += (moveY / maxDim) * force * coreT;
+          }
+        }
+      }
+    }
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = y * width + x;
+      const sx = clamp(Math.round(x - dxField[idx] * maxDim), 0, width - 1);
+      const sy = clamp(Math.round(y - dyField[idx] * maxDim), 0, height - 1);
+      const srcIdx = (sy * width + sx) * 4;
+      const dstIdx = idx * 4;
+      dst[dstIdx] = src[srcIdx];
+      dst[dstIdx + 1] = src[srcIdx + 1];
+      dst[dstIdx + 2] = src[srcIdx + 2];
+      dst[dstIdx + 3] = src[srcIdx + 3];
+    }
+  }
+
+  ctx.putImageData(output, 0, 0);
 }
 
 function PanelGroup({ title, children, defaultOpen = true }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
@@ -351,16 +570,30 @@ export default function App() {
   const [draggingLayerId, setDraggingLayerId] = useState<string | null>(null);
   const [canvasWidth, setCanvasWidth] = useState(840);
   const [canvasHeight, setCanvasHeight] = useState(472);
+  const [canvasWidthInput, setCanvasWidthInput] = useState('840');
+  const [canvasHeightInput, setCanvasHeightInput] = useState('472');
   const layerCanvasRefs = useRef<Record<string, DynamicTextureCanvasHandle | null>>({});
+  const compositeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const smudgeBrushPreviewRef = useRef<HTMLDivElement>(null);
+  const smudgeBrushPreviewInnerRef = useRef<HTMLDivElement>(null);
+  const smudgePaintingRef = useRef(false);
+  const smudgeStrokeRef = useRef<SmudgeDistortionStroke | null>(null);
+  const lastSmudgePointRef = useRef<SmudgeDistortionPoint | null>(null);
   const layerRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const selectedIdRef = useRef<string | null>(null);
   const stageViewportRef = useRef<HTMLDivElement>(null);
+  const compositeFrameRef = useRef(0);
+  const compositeNeedsFollowupRef = useRef(false);
+  const lastCompositeSignatureRef = useRef('');
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const selectedLayer = useMemo(
     () => layerState.layers.find(layer => layer.id === layerState.selectedLayerId) ?? layerState.layers[0],
     [layerState.layers, layerState.selectedLayerId],
   );
-  const settings = selectedLayer?.settings ?? TEXTURE_DEFAULTS;
+  const selectedTextureLayer = selectedLayer?.kind === 'texture' ? selectedLayer : null;
+  const selectedFilterLayer = selectedLayer?.kind === 'filter' ? selectedLayer : null;
+  const settings = selectedTextureLayer?.settings ?? TEXTURE_DEFAULTS;
+  const filterSettings = selectedFilterLayer?.filter ?? null;
 
   useEffect(() => {
     readPresetFile().then(file => {
@@ -377,6 +610,14 @@ export default function App() {
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    setCanvasWidthInput(String(canvasWidth));
+  }, [canvasWidth]);
+
+  useEffect(() => {
+    setCanvasHeightInput(String(canvasHeight));
+  }, [canvasHeight]);
 
   useEffect(() => {
     const element = stageViewportRef.current;
@@ -400,7 +641,12 @@ export default function App() {
     () => presets.find(preset => preset.id === selectedId) ?? null,
     [presets, selectedId],
   );
-  const hasUnsavedChanges = selectedPreset !== null && !areTextureLayerStatesEqual(layerState, sanitizeTextureLayerState(selectedPreset.layerState));
+  const serializedLayerState = useMemo(() => serializeTextureLayerState(layerState), [layerState]);
+  const serializedSelectedPresetState = useMemo(
+    () => selectedPreset ? serializeTextureLayerState(sanitizeTextureLayerState(selectedPreset.layerState)) : null,
+    [selectedPreset],
+  );
+  const hasUnsavedChanges = selectedPreset !== null && serializedLayerState !== serializedSelectedPresetState;
   const previewScale = useMemo(() => {
     if (stageSize.width <= 0 || stageSize.height <= 0) return 1;
     return Math.min(stageSize.width / canvasWidth, stageSize.height / canvasHeight, 1);
@@ -409,8 +655,64 @@ export default function App() {
   const previewHeight = Math.max(1, Math.round(canvasHeight * previewScale));
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(layerState));
-  }, [layerState]);
+    const timeout = window.setTimeout(() => {
+      localStorage.setItem(STORAGE_KEY, serializedLayerState);
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [serializedLayerState]);
+
+  const drawComposite = useCallback(() => {
+    const canvas = compositeCanvasRef.current;
+    if (!canvas) return;
+    const sourceVersions = layerState.layers.map(layer => {
+      if (layer.kind === 'filter') return `${layer.id}:filter`;
+      return `${layer.id}:${layerCanvasRefs.current[layer.id]?.getFrameVersion() ?? 0}`;
+    }).join('|');
+    const signature = `${canvasWidth}x${canvasHeight}:${serializedLayerState}:${sourceVersions}`;
+    if (signature === lastCompositeSignatureRef.current) return;
+    drawLayerStack(canvas, layerState.layers, layerCanvasRefs.current, canvasWidth, canvasHeight);
+    const hasReadyTextureLayer = layerState.layers.some(layer => (
+      layer.kind === 'texture' &&
+      (layerCanvasRefs.current[layer.id]?.getFrameVersion() ?? 0) > 0
+    ));
+    if (hasReadyTextureLayer) {
+      lastCompositeSignatureRef.current = signature;
+    }
+  }, [canvasHeight, canvasWidth, layerState.layers, serializedLayerState]);
+
+  const requestCompositeDraw = useCallback(() => {
+    if (compositeFrameRef.current) {
+      compositeNeedsFollowupRef.current = true;
+      return;
+    }
+    compositeFrameRef.current = requestAnimationFrame(() => {
+      const needsFollowup = compositeNeedsFollowupRef.current;
+      compositeFrameRef.current = 0;
+      compositeNeedsFollowupRef.current = false;
+      drawComposite();
+      if (needsFollowup || compositeNeedsFollowupRef.current) {
+        requestCompositeDraw();
+      }
+    });
+  }, [drawComposite]);
+
+  useEffect(() => {
+    requestCompositeDraw();
+    const retryFrame = requestAnimationFrame(requestCompositeDraw);
+    const retryTimeout = window.setTimeout(drawComposite, 80);
+    const lateRetryTimeout = window.setTimeout(drawComposite, 240);
+    return () => {
+      cancelAnimationFrame(retryFrame);
+      window.clearTimeout(retryTimeout);
+      window.clearTimeout(lateRetryTimeout);
+    };
+  }, [drawComposite, requestCompositeDraw]);
+
+  useEffect(() => {
+    return () => {
+      if (compositeFrameRef.current) cancelAnimationFrame(compositeFrameRef.current);
+    };
+  }, []);
 
   const updateSettings = (patch: Partial<TextureSettings>) => {
     setLayerState(prev => updateSelectedLayer(prev, layer => ({
@@ -422,8 +724,27 @@ export default function App() {
   const replaceSettings = (next: TextureSettings) => {
     setLayerState(prev => updateSelectedLayer(prev, layer => ({ ...layer, settings: sanitizeTextureSettings(next) })));
   };
-  const isHalftoneTexture = settings.textureType === 'halftone';
-  const isGradientTexture = settings.textureType === 'gradient';
+
+  const commitCanvasDimension = (
+    draftValue: string,
+    committedValue: number,
+    setCommittedValue: React.Dispatch<React.SetStateAction<number>>,
+    setDraftValue: React.Dispatch<React.SetStateAction<string>>,
+  ) => {
+    const parsedValue = Number.parseInt(draftValue, 10);
+    if (!Number.isFinite(parsedValue)) {
+      setDraftValue(String(committedValue));
+      return;
+    }
+    const nextValue = Math.max(100, parsedValue);
+    setCommittedValue(nextValue);
+    setDraftValue(String(nextValue));
+  };
+
+  const isTextureLayerSelected = selectedLayer?.kind === 'texture';
+  const isFilterLayerSelected = selectedLayer?.kind === 'filter';
+  const isHalftoneTexture = isTextureLayerSelected && settings.textureType === 'halftone';
+  const isGradientTexture = isTextureLayerSelected && settings.textureType === 'gradient';
   const currentTextureDefaults = useMemo(
     () => getTextureDefaults(settings.textureType),
     [settings.textureType],
@@ -435,6 +756,30 @@ export default function App() {
       <label className="field" key={key}>
         <span><span>{label}</span><b>{format(value)}</b></span>
         <input type="range" min={min} max={max} step={step} value={value} onChange={event => updateSettings({ [key]: Number(event.currentTarget.value) })} />
+      </label>
+    );
+  };
+
+  const updateSelectedFilterSettings = (patch: Partial<SmudgeDistortionFilter>) => {
+    setLayerState(prev => updateSelectedFilter(prev, layer => ({
+      ...layer,
+      filter: sanitizeSmudgeDistortionFilter({ ...layer.filter, ...patch }),
+    })));
+  };
+
+  const filterRange = (
+    key: Extract<keyof SmudgeDistortionFilter, 'strength' | 'brushSize' | 'brushStrength' | 'brushFeather'>,
+    label: string,
+    min: number,
+    max: number,
+    step: number,
+    format: (value: number) => string = value => String(value),
+  ) => {
+    const value = Number(filterSettings?.[key] ?? 0);
+    return (
+      <label className="field" key={key}>
+        <span><span>{label}</span><b>{format(value)}</b></span>
+        <input type="range" min={min} max={max} step={step} value={value} onChange={event => updateSelectedFilterSettings({ [key]: Number(event.currentTarget.value) })} />
       </label>
     );
   };
@@ -523,7 +868,18 @@ export default function App() {
 
   const addLayer = () => {
     setLayerState(prev => {
-      const nextLayer = createTextureLayer(prev.layers.length + 1);
+      const nextLayer = createTextureLayer(prev.layers.filter(layer => layer.kind === 'texture').length + 1);
+      return {
+        layers: [nextLayer, ...prev.layers],
+        selectedLayerId: nextLayer.id,
+      };
+    });
+    setBlendMenuLayerId(null);
+  };
+
+  const addFilterLayer = () => {
+    setLayerState(prev => {
+      const nextLayer = createSmudgeFilterLayer(prev.layers.filter(layer => layer.kind === 'filter').length + 1);
       return {
         layers: [nextLayer, ...prev.layers],
         selectedLayerId: nextLayer.id,
@@ -535,7 +891,14 @@ export default function App() {
   const updateLayer = (id: string, patch: Partial<Pick<TextureLayer, 'name' | 'blendMode' | 'settings'>>) => {
     setLayerState(prev => ({
       ...prev,
-      layers: prev.layers.map(layer => layer.id === id ? { ...layer, ...patch } : layer),
+      layers: prev.layers.map(layer => layer.id === id && layer.kind === 'texture' ? { ...layer, ...patch } : layer),
+    }));
+  };
+
+  const updateFilterLayer = (id: string, patch: Partial<Pick<FilterLayer, 'name' | 'filter'>>) => {
+    setLayerState(prev => ({
+      ...prev,
+      layers: prev.layers.map(layer => layer.id === id && layer.kind === 'filter' ? { ...layer, ...patch } : layer),
     }));
   };
 
@@ -555,7 +918,7 @@ export default function App() {
     setDraggingLayerId(current => current === id ? null : current);
   };
 
-  const getLayerInsertionIndex = (clientY: number, draggedId: string, layers: TextureLayer[]) => {
+  const getLayerInsertionIndex = (clientY: number, draggedId: string, layers: Layer[]) => {
     let insertionIndex = 0;
 
     for (const layer of layers) {
@@ -594,14 +957,25 @@ export default function App() {
     const previousUserSelect = document.body.style.userSelect;
     document.body.style.cursor = 'grabbing';
     document.body.style.userSelect = 'none';
+    let dragFrame = 0;
+    let latestClientY = 0;
 
     const handlePointerMove = (event: PointerEvent) => {
       event.preventDefault();
-      const insertionIndex = getLayerInsertionIndex(event.clientY, draggingLayerId, layerState.layers);
-      moveLayerToIndex(draggingLayerId, insertionIndex);
+      latestClientY = event.clientY;
+      if (dragFrame) return;
+      dragFrame = requestAnimationFrame(() => {
+        dragFrame = 0;
+        const insertionIndex = getLayerInsertionIndex(latestClientY, draggingLayerId, layerState.layers);
+        moveLayerToIndex(draggingLayerId, insertionIndex);
+      });
     };
 
     const finishDrag = () => {
+      if (dragFrame) {
+        cancelAnimationFrame(dragFrame);
+        dragFrame = 0;
+      }
       setDraggingLayerId(null);
     };
 
@@ -617,6 +991,7 @@ export default function App() {
     return () => {
       document.body.style.cursor = previousCursor;
       document.body.style.userSelect = previousUserSelect;
+      if (dragFrame) cancelAnimationFrame(dragFrame);
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', finishDrag);
       window.removeEventListener('pointercancel', finishDrag);
@@ -628,23 +1003,96 @@ export default function App() {
     const output = document.createElement('canvas');
     output.width = canvasWidth;
     output.height = canvasHeight;
-    const outputCtx = output.getContext('2d');
-    if (!outputCtx) return;
-    const drawOrder = [...layerState.layers].reverse();
-    let hasDrawnLayer = false;
-    drawOrder.forEach(layer => {
-      const source = layerCanvasRefs.current[layer.id]?.canvas;
-      if (!source) return;
-      outputCtx.globalCompositeOperation = hasDrawnLayer ? layerBlendToCanvas(layer.blendMode) : 'source-over';
-      outputCtx.drawImage(source, 0, 0, canvasWidth, canvasHeight);
-      hasDrawnLayer = true;
-    });
-    outputCtx.globalCompositeOperation = 'source-over';
+    drawLayerStack(output, layerState.layers, layerCanvasRefs.current, canvasWidth, canvasHeight);
     const url = output.toDataURL('image/png');
     const link = document.createElement('a');
     link.href = url;
     link.download = `dynamic-texture-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
     link.click();
+  };
+
+  const syncSmudgeBrushPreview = (point: SmudgeDistortionPoint | null) => {
+    const preview = smudgeBrushPreviewRef.current;
+    const inner = smudgeBrushPreviewInnerRef.current;
+    if (!preview || !inner || !filterSettings?.brushEnabled || !point) {
+      if (preview) preview.style.opacity = '0';
+      return;
+    }
+    const size = Math.max(4, filterSettings.brushSize);
+    const feather = Math.max(0, filterSettings.brushFeather);
+    const scale = previewScale;
+    const outerSize = (size + feather * 2) * scale;
+    const innerSize = size * scale;
+    preview.style.opacity = '1';
+    preview.style.left = `${point.x * canvasWidth * scale}px`;
+    preview.style.top = `${point.y * canvasHeight * scale}px`;
+    preview.style.width = `${outerSize}px`;
+    preview.style.height = `${outerSize}px`;
+    inner.style.width = `${innerSize}px`;
+    inner.style.height = `${innerSize}px`;
+    inner.style.opacity = feather > 0 ? '0.65' : '0';
+  };
+
+  const eventToCanvasPoint = (event: ReactPointerEvent<HTMLDivElement> | PointerEvent): SmudgeDistortionPoint => {
+    const canvas = compositeCanvasRef.current;
+    const rect = canvas?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
+    return {
+      x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+      y: clamp((event.clientY - rect.top) / rect.height, 0, 1),
+    };
+  };
+
+  const commitSmudgeStroke = () => {
+    const stroke = smudgeStrokeRef.current;
+    smudgePaintingRef.current = false;
+    smudgeStrokeRef.current = null;
+    lastSmudgePointRef.current = null;
+    if (!stroke || stroke.points.length < 2) return;
+    setLayerState(prev => updateSelectedFilter(prev, layer => ({
+      ...layer,
+      filter: sanitizeSmudgeDistortionFilter({
+        ...layer.filter,
+        strokes: [...layer.filter.strokes, stroke].slice(-80),
+      }),
+    })));
+  };
+
+  const beginSmudgeStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!filterSettings?.brushEnabled || event.button !== 0) return;
+    event.preventDefault();
+    const point = eventToCanvasPoint(event);
+    const stroke: SmudgeDistortionStroke = {
+      points: [point],
+      brushSize: filterSettings.brushSize,
+      brushStrength: filterSettings.brushStrength,
+      brushFeather: filterSettings.brushFeather,
+    };
+    smudgePaintingRef.current = true;
+    smudgeStrokeRef.current = stroke;
+    lastSmudgePointRef.current = point;
+    syncSmudgeBrushPreview(point);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const moveSmudgeStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const point = eventToCanvasPoint(event);
+    syncSmudgeBrushPreview(point);
+    if (!smudgePaintingRef.current || !smudgeStrokeRef.current) return;
+    event.preventDefault();
+    const last = lastSmudgePointRef.current;
+    if (last && pointDistance(last, point, canvasWidth, canvasHeight) < 2) return;
+    smudgeStrokeRef.current.points = [...smudgeStrokeRef.current.points, point].slice(-400);
+    lastSmudgePointRef.current = point;
+  };
+
+  const undoSmudgeStroke = () => {
+    if (!filterSettings) return;
+    updateSelectedFilterSettings({ strokes: filterSettings.strokes.slice(0, -1) });
+  };
+
+  const resetSmudgeStrokes = () => {
+    updateSelectedFilterSettings({ strokes: [] });
   };
 
   return (
@@ -657,32 +1105,63 @@ export default function App() {
       <section className="stage">
         <div className="stage-viewport" ref={stageViewportRef}>
           <div className="canvas-card" style={{ width: previewWidth, height: previewHeight }}>
-            {layerState.layers.map((layer, index) => (
+            {layerState.layers.filter((layer): layer is TextureLayer => layer.kind === 'texture').map((layer, index) => (
               <div
-                className="texture-layer-canvas"
+                className="texture-layer-canvas texture-source-layer"
                 key={layer.id}
                 style={{
-                  zIndex: layerState.layers.length - index,
-                  mixBlendMode: layerBlendToCss(layer.blendMode),
+                  zIndex: index + 1,
                   pointerEvents: layer.id === layerState.selectedLayerId ? 'auto' : 'none',
                 }}
               >
                 <DynamicTextureCanvas
-                  ref={handle => { layerCanvasRefs.current[layer.id] = handle; }}
+                  ref={handle => {
+                    layerCanvasRefs.current[layer.id] = handle;
+                    if (handle) requestCompositeDraw();
+                  }}
                   settings={layer.settings}
                   width={canvasWidth}
                   height={canvasHeight}
+                  layerId={layer.id}
+                  onFrame={requestCompositeDraw}
+                  renderScale={1}
                 />
               </div>
             ))}
+            <canvas
+              ref={compositeCanvasRef}
+              className="composite-canvas"
+              width={canvasWidth}
+              height={canvasHeight}
+              style={{ pointerEvents: 'none' }}
+            />
+            {isFilterLayerSelected && filterSettings?.brushEnabled ? (
+              <div
+                className="smudge-input-layer"
+                onPointerDown={beginSmudgeStroke}
+                onPointerMove={moveSmudgeStroke}
+                onPointerUp={event => {
+                  commitSmudgeStroke();
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                }}
+                onPointerCancel={event => {
+                  commitSmudgeStroke();
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                }}
+                onPointerLeave={() => syncSmudgeBrushPreview(null)}
+              />
+            ) : null}
+            <div className="smudge-brush-preview" ref={smudgeBrushPreviewRef}>
+              <div ref={smudgeBrushPreviewInnerRef} />
+            </div>
           </div>
         </div>
       </section>
 
       <aside className="tool-panel">
         <PanelGroup title="画布">
-          <label className="input-row"><span>宽度</span><input type="text" inputMode="numeric" value={String(canvasWidth)} style={{ width: 128 }} onChange={event => setCanvasWidth(Math.max(100, Number.parseInt(event.currentTarget.value, 10) || 100))} /></label>
-          <label className="input-row"><span>高度</span><input type="text" inputMode="numeric" value={String(canvasHeight)} style={{ width: 128 }} onChange={event => setCanvasHeight(Math.max(100, Number.parseInt(event.currentTarget.value, 10) || 100))} /></label>
+          <label className="input-row"><span>宽度</span><input type="text" inputMode="numeric" value={canvasWidthInput} style={{ width: 128 }} onChange={event => setCanvasWidthInput(event.currentTarget.value)} onBlur={() => commitCanvasDimension(canvasWidthInput, canvasWidth, setCanvasWidth, setCanvasWidthInput)} /></label>
+          <label className="input-row"><span>高度</span><input type="text" inputMode="numeric" value={canvasHeightInput} style={{ width: 128 }} onChange={event => setCanvasHeightInput(event.currentTarget.value)} onBlur={() => commitCanvasDimension(canvasHeightInput, canvasHeight, setCanvasHeight, setCanvasHeightInput)} /></label>
           <button type="button" className="wide-button" onClick={exportCurrentImage}>导出图片</button>
         </PanelGroup>
 
@@ -710,11 +1189,14 @@ export default function App() {
         </PanelGroup>
 
         <PanelGroup title="纹理层">
-          <button type="button" className="add-layer-button" onClick={addLayer}>新建图层 +</button>
+          <div className="layer-add-row">
+            <button type="button" className="add-layer-button" onClick={addLayer}>新建图层 +</button>
+            <button type="button" className="add-layer-button" onClick={addFilterLayer}>新建滤镜 +</button>
+          </div>
           <div className="texture-layer-list">
             {layerState.layers.map(layer => (
               <div
-                className={`texture-layer-row ${layer.id === layerState.selectedLayerId ? 'active' : ''} ${layer.id === draggingLayerId ? 'dragging' : ''}`}
+                className={`texture-layer-row ${layer.kind === 'filter' ? 'filter-layer-row' : ''} ${layer.id === layerState.selectedLayerId ? 'active' : ''} ${layer.id === draggingLayerId ? 'dragging' : ''}`}
                 key={layer.id}
                 ref={node => { layerRowRefs.current[layer.id] = node; }}
                 onClick={() => setLayerState(prev => ({ ...prev, selectedLayerId: layer.id }))}
@@ -729,12 +1211,15 @@ export default function App() {
                   ⋮⋮
                 </button>
                 <input
-                  aria-label="图层名称"
+                  aria-label={layer.kind === 'filter' ? '滤镜名称' : '图层名称'}
                   value={layer.name}
-                  onChange={event => updateLayer(layer.id, { name: event.currentTarget.value })}
+                  onChange={event => {
+                    if (layer.kind === 'filter') updateFilterLayer(layer.id, { name: event.currentTarget.value });
+                    else updateLayer(layer.id, { name: event.currentTarget.value });
+                  }}
                   onClick={event => event.stopPropagation()}
                 />
-                <div className="blend-menu-wrap">
+                {layer.kind === 'texture' ? <div className="blend-menu-wrap">
                   <button
                     type="button"
                     className="blend-menu-button"
@@ -768,8 +1253,8 @@ export default function App() {
                       ))}
                     </div>
                   ) : null}
-                </div>
-                <select
+                </div> : <span className="filter-layer-type">涂抹畸变</span>}
+                {layer.kind === 'texture' ? <select
                   value={layer.settings.textureType}
                   onChange={event => {
                     const textureType = event.currentTarget.value as TextureType;
@@ -779,7 +1264,7 @@ export default function App() {
                 >
                   <option value="halftone">半调点阵</option>
                   <option value="gradient">渐变背景</option>
-                </select>
+                </select> : <span className="filter-layer-scope">作用下方</span>}
                 <button
                   type="button"
                   className="layer-delete-button"
@@ -797,6 +1282,7 @@ export default function App() {
           </div>
         </PanelGroup>
 
+        {isTextureLayerSelected ? <>
         <PanelGroup title="动画参数">
           <label className="check-row"><span>启用动画</span><input type="checkbox" checked={settings.animEnabled !== false} onChange={event => updateSettings({ animEnabled: event.currentTarget.checked })} /></label>
           {isHalftoneTexture ? <>
@@ -914,6 +1400,24 @@ export default function App() {
         </PanelGroup> : null}
 
         <button type="button" className="wide-button reset" onClick={() => replaceSettings(currentTextureDefaults)}>恢复纹理默认参数</button>
+        </> : null}
+
+        {isFilterLayerSelected && filterSettings ? <>
+          <PanelGroup title="绘制">
+            <label className="check-row"><span>启用画笔</span><input type="checkbox" checked={filterSettings.brushEnabled} onChange={event => updateSelectedFilterSettings({ brushEnabled: event.currentTarget.checked })} /></label>
+            {filterRange('brushSize', '画笔大小', 4, 400, 1, value => `${Math.round(value)} px`)}
+            {filterRange('brushStrength', '画笔强度', 0, 1, 0.01, value => value.toFixed(2))}
+            {filterRange('brushFeather', '画笔柔和度', 0, 400, 1, value => `${Math.round(value)} px`)}
+            <div className="button-row">
+              <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={undoSmudgeStroke}>撤销</button>
+              <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={resetSmudgeStrokes}>重置</button>
+            </div>
+          </PanelGroup>
+          <PanelGroup title="滤镜参数">
+            <label className="check-row"><span>启用滤镜</span><input type="checkbox" checked={filterSettings.enabled} onChange={event => updateSelectedFilterSettings({ enabled: event.currentTarget.checked })} /></label>
+            {filterRange('strength', '滤镜强度', 0, 1, 0.01, value => value.toFixed(2))}
+          </PanelGroup>
+        </> : null}
       </aside>
     </main>
   );

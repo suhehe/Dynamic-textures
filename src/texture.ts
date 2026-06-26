@@ -106,12 +106,45 @@ export interface TexturePreset {
   updatedAt: string;
 }
 
-export interface TexturePresetLayer {
+export interface SmudgeDistortionPoint {
+  x: number;
+  y: number;
+}
+
+export interface SmudgeDistortionStroke {
+  points: SmudgeDistortionPoint[];
+  brushSize: number;
+  brushStrength: number;
+  brushFeather: number;
+}
+
+export interface SmudgeDistortionFilter {
+  type: 'smudgeDistortion';
+  enabled: boolean;
+  strength: number;
+  brushEnabled: boolean;
+  brushSize: number;
+  brushStrength: number;
+  brushFeather: number;
+  strokes: SmudgeDistortionStroke[];
+}
+
+export interface TexturePresetTextureLayer {
   id: string;
+  kind: 'texture';
   name: string;
   settings: TextureSettings;
   blendMode: string;
 }
+
+export interface TexturePresetFilterLayer {
+  id: string;
+  kind: 'filter';
+  name: string;
+  filter: SmudgeDistortionFilter;
+}
+
+export type TexturePresetLayer = TexturePresetTextureLayer | TexturePresetFilterLayer;
 
 export interface TexturePresetLayerState {
   layers: TexturePresetLayer[];
@@ -282,6 +315,46 @@ function sanitizeCharacterSet(value: unknown, fallback: string) {
   return chars.length ? chars.join('').slice(0, 48) : fallback;
 }
 
+function sanitizeSmudgePoint(raw: unknown): SmudgeDistortionPoint | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const point = raw as Partial<SmudgeDistortionPoint>;
+  return {
+    x: clampSetting(point.x, 0, 1, 0),
+    y: clampSetting(point.y, 0, 1, 0),
+  };
+}
+
+export function sanitizeSmudgeDistortionFilter(raw: unknown): SmudgeDistortionFilter {
+  const input = raw && typeof raw === 'object' ? raw as Partial<SmudgeDistortionFilter> : {};
+  const strokes = Array.isArray(input.strokes)
+    ? input.strokes.map(item => {
+        if (!item || typeof item !== 'object') return null;
+        const stroke = item as Partial<SmudgeDistortionStroke>;
+        const points = Array.isArray(stroke.points)
+          ? stroke.points.map(sanitizeSmudgePoint).filter((point): point is SmudgeDistortionPoint => point !== null).slice(0, 400)
+          : [];
+        if (points.length < 2) return null;
+        return {
+          points,
+          brushSize: clampSetting(stroke.brushSize, 4, 400, 80),
+          brushStrength: clampSetting(stroke.brushStrength, 0, 1, 0.45),
+          brushFeather: clampSetting(stroke.brushFeather, 0, 400, 48),
+        };
+      }).filter((item): item is SmudgeDistortionStroke => item !== null).slice(-80)
+    : [];
+
+  return {
+    type: 'smudgeDistortion',
+    enabled: typeof input.enabled === 'boolean' ? input.enabled : true,
+    strength: clampSetting(input.strength, 0, 1, 1),
+    brushEnabled: typeof input.brushEnabled === 'boolean' ? input.brushEnabled : true,
+    brushSize: clampSetting(input.brushSize, 4, 400, 80),
+    brushStrength: clampSetting(input.brushStrength, 0, 1, 0.45),
+    brushFeather: clampSetting(input.brushFeather, 0, 400, 48),
+    strokes,
+  };
+}
+
 export function sanitizeGradientStops(raw: unknown, fallback = TEXTURE_DEFAULTS.gradientStops): GradientColorStop[] {
   if (!Array.isArray(raw) || raw.length < 2) return fallback;
   const stops = raw.map((item: unknown) => {
@@ -394,10 +467,21 @@ export function sanitizePresetLayerState(raw: unknown): TexturePresetLayerState 
     const layers = (input.layers ?? [])
       .map((item, index) => {
         if (!item || typeof item !== 'object') return null;
-        const layer = item as Partial<TexturePresetLayer>;
+        const layer = item as Partial<TexturePresetLayer> & { settings?: unknown; blendMode?: unknown; filter?: unknown; kind?: unknown };
+        const id = typeof layer.id === 'string' && layer.id.trim() ? layer.id.trim() : `layer-${index + 1}`;
+        const name = typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `图层${index + 1}`;
+        if (layer.kind === 'filter') {
+          return {
+            id,
+            kind: 'filter',
+            name,
+            filter: sanitizeSmudgeDistortionFilter(layer.filter),
+          };
+        }
         return {
-          id: typeof layer.id === 'string' && layer.id.trim() ? layer.id.trim() : `layer-${index + 1}`,
-          name: typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `图层${index + 1}`,
+          id,
+          kind: 'texture',
+          name,
           settings: sanitizeTextureSettings(layer.settings),
           blendMode: typeof layer.blendMode === 'string' && layer.blendMode.trim() ? layer.blendMode.trim() : 'normal',
         };
@@ -414,6 +498,7 @@ export function sanitizePresetLayerState(raw: unknown): TexturePresetLayerState 
   const settings = sanitizeTextureSettings(raw);
   const layer: TexturePresetLayer = {
     id: 'layer-1',
+    kind: 'texture',
     name: '图层1',
     settings,
     blendMode: 'normal',
@@ -431,11 +516,12 @@ export function sanitizePresetFile(raw: unknown): TexturePresetFile {
         if (typeof preset.id !== 'string' || !preset.id.trim()) return null;
         const now = new Date().toISOString();
         const layerState = sanitizePresetLayerState(preset.layerState ?? preset.settings);
-        const selectedLayer = layerState.layers.find(layer => layer.id === layerState.selectedLayerId) ?? layerState.layers[0];
+        const selectedLayer = layerState.layers.find(layer => layer.id === layerState.selectedLayerId && layer.kind === 'texture') as TexturePresetTextureLayer | undefined;
+        const firstTextureLayer = layerState.layers.find((layer): layer is TexturePresetTextureLayer => layer.kind === 'texture');
         return {
           id: preset.id.trim(),
           name: typeof preset.name === 'string' && preset.name.trim() ? preset.name.trim() : '未命名纹理预设',
-          settings: selectedLayer.settings,
+          settings: (selectedLayer ?? firstTextureLayer)?.settings ?? sanitizeTextureSettings(preset.settings),
           layerState,
           createdAt: typeof preset.createdAt === 'string' ? preset.createdAt : now,
           updatedAt: typeof preset.updatedAt === 'string' ? preset.updatedAt : now,
