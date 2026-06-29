@@ -46,6 +46,10 @@ type NumberKey = Extract<keyof TextureSettings,
 
 const STORAGE_KEY = 'dynamic-textures.current.v1';
 const CANVAS_STATUS_SPACE = 32;
+// Loading overlay timing: hide shortly after rendering quiets down, with a hard
+// cap so continuously animating layers don't keep the spinner up indefinitely.
+const CANVAS_LOADER_SETTLE_MS = 220;
+const CANVAS_LOADER_MAX_MS = 700;
 
 type TextureLayerBlendMode =
   | 'pass-through'
@@ -797,6 +801,11 @@ export default function App() {
   const dragPreviewOrderRef = useRef<string[] | null>(null);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [processingTask, setProcessingTask] = useState<string | null>(null);
+  const [isCanvasUpdating, setIsCanvasUpdating] = useState(false);
+  const isCanvasUpdatingRef = useRef(false);
+  const loaderSettleTimerRef = useRef(0);
+  const loaderHardStopTimerRef = useRef(0);
+  const pendingPaintBarrierRef = useRef(false);
   const selectedLayer = useMemo(
     () => layerState.layers.find(layer => layer.id === layerState.selectedLayerId) ?? layerState.layers[0],
     [layerState.layers, layerState.selectedLayerId],
@@ -890,6 +899,41 @@ export default function App() {
     return () => window.clearTimeout(timeout);
   }, [layerState]);
 
+  const setCanvasUpdating = useCallback((value: boolean) => {
+    isCanvasUpdatingRef.current = value;
+    setIsCanvasUpdating(value);
+  }, []);
+
+  const finishCanvasUpdate = useCallback(() => {
+    if (loaderSettleTimerRef.current) {
+      window.clearTimeout(loaderSettleTimerRef.current);
+      loaderSettleTimerRef.current = 0;
+    }
+    if (loaderHardStopTimerRef.current) {
+      window.clearTimeout(loaderHardStopTimerRef.current);
+      loaderHardStopTimerRef.current = 0;
+    }
+    setCanvasUpdating(false);
+  }, [setCanvasUpdating]);
+
+  // Re-arm the settle timer whenever the canvas reports rendering progress, so
+  // the loader stays visible across multi-stage work and hides once it quiets.
+  const markCanvasActivity = useCallback(() => {
+    if (!isCanvasUpdatingRef.current) return;
+    if (loaderSettleTimerRef.current) window.clearTimeout(loaderSettleTimerRef.current);
+    loaderSettleTimerRef.current = window.setTimeout(finishCanvasUpdate, CANVAS_LOADER_SETTLE_MS);
+  }, [finishCanvasUpdate]);
+
+  // Called synchronously from user actions that trigger a heavy recompute.
+  const beginCanvasUpdate = useCallback(() => {
+    pendingPaintBarrierRef.current = true;
+    if (!isCanvasUpdatingRef.current) setCanvasUpdating(true);
+    if (loaderSettleTimerRef.current) window.clearTimeout(loaderSettleTimerRef.current);
+    loaderSettleTimerRef.current = window.setTimeout(finishCanvasUpdate, CANVAS_LOADER_SETTLE_MS);
+    if (loaderHardStopTimerRef.current) window.clearTimeout(loaderHardStopTimerRef.current);
+    loaderHardStopTimerRef.current = window.setTimeout(finishCanvasUpdate, CANVAS_LOADER_MAX_MS);
+  }, [finishCanvasUpdate, setCanvasUpdating]);
+
   const drawComposite = useCallback(() => {
     const canvas = compositeCanvasRef.current;
     if (!canvas) return;
@@ -910,19 +954,20 @@ export default function App() {
       if (hasReadyTextureLayer || !hasVisibleTextureLayer) {
         lastCompositeSignatureRef.current = signature;
       }
+      markCanvasActivity();
     } finally {
       if (!pendingProcessingCommitRef.current) {
         setProcessingTask(null);
       }
     }
-  }, [canvasHeight, canvasWidth, compositeLayerSignature, layerState.layers]);
+  }, [canvasHeight, canvasWidth, compositeLayerSignature, layerState.layers, markCanvasActivity]);
 
   const requestCompositeDraw = useCallback(() => {
     if (compositeFrameRef.current) {
       compositeNeedsFollowupRef.current = true;
       return;
     }
-    compositeFrameRef.current = requestAnimationFrame(() => {
+    const runComposite = () => {
       const needsFollowup = compositeNeedsFollowupRef.current;
       compositeFrameRef.current = 0;
       compositeNeedsFollowupRef.current = false;
@@ -930,8 +975,33 @@ export default function App() {
       if (needsFollowup || compositeNeedsFollowupRef.current) {
         requestCompositeDraw();
       }
-    });
+    };
+    if (pendingPaintBarrierRef.current) {
+      // Insert one extra painted frame before the heavy composite so the
+      // loading overlay becomes visible before the main thread is blocked.
+      pendingPaintBarrierRef.current = false;
+      compositeFrameRef.current = requestAnimationFrame(() => {
+        compositeFrameRef.current = requestAnimationFrame(runComposite);
+      });
+    } else {
+      compositeFrameRef.current = requestAnimationFrame(runComposite);
+    }
   }, [drawComposite]);
+
+  // Catch-all: any change that alters the rendered output (layer visibility,
+  // blend mode, ordering, add/remove, texture or filter settings) changes the
+  // composite signature. Showing the loader here guarantees every canvas-update
+  // operation surfaces the animation, even ones without an explicit trigger.
+  // Declared before the composite-trigger effect so the paint barrier is armed
+  // before the composite is scheduled.
+  const compositeSignatureInitRef = useRef(true);
+  useEffect(() => {
+    if (compositeSignatureInitRef.current) {
+      compositeSignatureInitRef.current = false;
+      return;
+    }
+    beginCanvasUpdate();
+  }, [compositeLayerSignature, beginCanvasUpdate]);
 
   useEffect(() => {
     requestCompositeDraw();
@@ -962,10 +1032,13 @@ export default function App() {
     return () => {
       if (compositeFrameRef.current) cancelAnimationFrame(compositeFrameRef.current);
       if (processingCommitTimeoutRef.current) window.clearTimeout(processingCommitTimeoutRef.current);
+      if (loaderSettleTimerRef.current) window.clearTimeout(loaderSettleTimerRef.current);
+      if (loaderHardStopTimerRef.current) window.clearTimeout(loaderHardStopTimerRef.current);
     };
   }, []);
 
   const updateSettings = (patch: Partial<TextureSettings>) => {
+    beginCanvasUpdate();
     setLayerState(prev => updateSelectedLayer(prev, layer => ({
       ...layer,
       settings: sanitizeTextureSettings({ ...layer.settings, ...patch }),
@@ -973,6 +1046,7 @@ export default function App() {
   };
 
   const replaceSettings = (next: TextureSettings) => {
+    beginCanvasUpdate();
     setLayerState(prev => updateSelectedLayer(prev, layer => ({ ...layer, settings: sanitizeTextureSettings(next) })));
   };
 
@@ -988,6 +1062,7 @@ export default function App() {
       return;
     }
     const nextValue = Math.max(100, parsedValue);
+    if (nextValue !== committedValue) beginCanvasUpdate();
     setCommittedValue(nextValue);
     setDraftValue(String(nextValue));
   };
@@ -1012,6 +1087,7 @@ export default function App() {
   };
 
   const setSelectedFilterState = (nextFilter: TextureFilter) => {
+    beginCanvasUpdate();
     setLayerState(prev => updateSelectedFilter(prev, layer => ({
       ...layer,
       filter: sanitizeTextureFilter(nextFilter),
@@ -1097,6 +1173,7 @@ export default function App() {
     setPresets(file.presets);
     setSelectedId(file.selectedId);
     selectedIdRef.current = file.selectedId;
+    beginCanvasUpdate();
     setLayerState(sanitizeTextureLayerState(preset.layerState));
   };
 
@@ -1115,6 +1192,7 @@ export default function App() {
     if (!selectedPreset || !hasUnsavedChanges) return;
     const confirmed = window.confirm(`确定要重置预设「${selectedPreset.name}」吗？这会放弃当前所有未保存的修改。`);
     if (!confirmed) return;
+    beginCanvasUpdate();
     setLayerState(sanitizeTextureLayerState(selectedPreset.layerState));
   };
 
@@ -1395,6 +1473,7 @@ export default function App() {
     smudgeStrokeRef.current = null;
     lastSmudgePointRef.current = null;
     if (!stroke || stroke.points.length < 2) return;
+    beginCanvasUpdate();
     pendingProcessingCommitRef.current = true;
     setProcessingTask('涂抹畸变');
     processingCommitTimeoutRef.current = window.setTimeout(() => {
@@ -1419,6 +1498,7 @@ export default function App() {
     paintMaskStrokeRef.current = null;
     lastPaintMaskPointRef.current = null;
     if (!stroke || stroke.points.length < 1) return;
+    beginCanvasUpdate();
     pendingProcessingCommitRef.current = true;
     setProcessingTask('绘制蒙版');
     processingCommitTimeoutRef.current = window.setTimeout(() => {
@@ -1552,6 +1632,11 @@ export default function App() {
               height={canvasHeight}
               style={{ pointerEvents: 'none' }}
             />
+            <div className={`canvas-loader${isCanvasUpdating ? ' is-visible' : ''}`} aria-hidden={!isCanvasUpdating}>
+              <div className="canvas-loader-orbit">
+                <span className="canvas-loader-ring" />
+              </div>
+            </div>
             {isFilterLayerSelected && filterSettings?.brushEnabled ? (
               <div
                 className="smudge-input-layer"

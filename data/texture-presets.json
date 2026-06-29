@@ -1,5 +1,5 @@
 {
-  "selectedId": "texture-1782382273361",
+  "selectedId": "texture-1782730425334",
   "presets": [
     {
       "id": "texture-1782381734937",
@@ -1243,6 +1243,731 @@
       },
       "createdAt": "2026-06-26T04:25:58.166Z",
       "updatedAt": "2026-06-26T04:25:58.166Z"
+    },
+    {
+      "id": "texture-1782730425334",
+      "name": "纹理预设 4",
+      "settings": {
+        "textureType": "gradient",
+        "enabled": true,
+        "animEnabled": false,
+        "animType": "vortex",
+        "speed": 2,
+        "directionDeg": 18,
+        "coherence": 1,
+        "spotCount": 7,
+        "spotSize": 100,
+        "spotBlur": 0,
+        "spotType": "gaussian",
+        "spotScale": 1,
+        "spotOffsetX": 0,
+        "spotOffsetY": 0,
+        "spotMaskEnabled": false,
+        "spotMaskBrush": "black",
+        "spotMaskBrushSize": 36,
+        "spotMaskBrushOpacity": 1,
+        "spotMaskFeather": 10,
+        "randomness": 0.36,
+        "dotEnabled": true,
+        "dotColor": "#000000",
+        "dotOpacity": 1,
+        "dotSpacing": 11,
+        "dotTileType": "square",
+        "dotMinSize": 0.28,
+        "dotMaxSize": 1.2,
+        "dotYOffsetMap": 0,
+        "dotTurbulenceEnabled": false,
+        "dotTurbulenceStrength": 0,
+        "dotTurbulenceSmoothness": 72,
+        "dotTurbulenceSeed": 173,
+        "contrast": 1.08,
+        "threshold": 0.08,
+        "fadeEdgeTop": 0.32,
+        "fadeEdgeBottom": 0.32,
+        "fadeEdgeLeft": 0.32,
+        "fadeEdgeRight": 0.32,
+        "symbol": "circle",
+        "dotSymbolChars": "01{}[]()<>/\\=+-*;:._#$&|!?",
+        "seed": 26,
+        "mouseInteractive": true,
+        "mouseInteractionRadius": 20,
+        "mouseInteractionInitialSpeed": 4,
+        "mouseInteractionFinalSpeed": 0,
+        "mouseInteractionDuration": 2,
+        "mouseInteractionArea": 0.5,
+        "mouseInteractionChars": "01{}[]()<>/\\=+-*;:._#$&|!?",
+        "activationEnabled": false,
+        "activationShowTexture": false,
+        "activationType": "ripple",
+        "activationOffsetX": 0,
+        "activationOffsetY": 0,
+        "activationRadiusX": 300,
+        "activationRadiusY": 300,
+        "activationInitialSpeed": 4,
+        "activationFinalSpeed": 0,
+        "activationDuration": 3,
+        "activationRippleInterval": 1,
+        "activationRingWidth": 80,
+        "activationChars": "01{}[]()<>/\\=+-*;:._#$&|!?",
+        "gradientEnabled": true,
+        "gradientStops": [
+          {
+            "position": 0.18258001865484777,
+            "color": "#F94F1E",
+            "opacity": 1
+          },
+          {
+            "position": 0.5515864445612981,
+            "color": "#ff964f",
+            "opacity": 1
+          },
+          {
+            "position": 0.8169000087640225,
+            "color": "#ffb3a2",
+            "opacity": 1
+          },
+          {
+            "position": 1,
+            "color": "#e8e7fd",
+            "opacity": 1
+          }
+        ],
+        "gradientAngle": 90,
+        "gradientFadeEdgeTop": 0,
+        "gradientFadeEdgeBottom": 0,
+        "gradientFadeEdgeLeft": 0,
+        "gradientFadeEdgeRight": 0,
+        "gradientAnimType": "flow",
+        "gradientFlowScaleX": 0.1,
+        "gradientFlowScaleY": 0.1,
+        "gradientFlowRotation": 0,
+        "gradientFlowWarp": 1,
+        "gradientFlowSoftness": 0.04,
+        "gradientFlowComplexity": 3,
+        "gradientAnimEnabled": false,
+        "gradientAnimSpeed": 0.63,
+        "gradientAnimIntensity": 0.5,
+        "gradientAnimDirection": 0
+      },
+      "layerState": {
+        "layers": [
+          {
+            "id": "filter-1782730329341-t2loao",
+            "kind": "filter",
+            "name": "滤镜1",
+            "visible": true,
+            "filter": {
+              "type": "smudgeDistortion",
+              "enabled": true,
+              "strength": 1,
+              "precision": 2,
+              "brushEnabled": true,
+              "brushSize": 316,
+              "brushStrength": 0.45,
+              "brushFeather": 48,
+              "strokes": [
+                {
+                  "points": [
+                    {
+                      "x": 0.29665173982319076,
+                      "y": 0.2957097833806818
+                    },
+                    {
+                      "x": 0.30033425723805146,
+                      "y": 0.298331100421832
+                    },
+                    {
+                      "x": 0.31711968106012967,
+                      "y": 0.30655117402720383
+                    },
+                    {
+                      "x": 0.34690275871347714,
+                      "y": 0.3174993341619318
+                    },
+                    {
+                      "x": 0.38968358467976005,
+                      "y": 0.32891627119920797
+                    },
+                    {
+                      "x": 0.43600926827351005,
+                      "y": 0.3442534139333678
+                    },
+                    {
+                      "x": 0.4835165395825271,
+                      "y": 0.3557821646866391
+                    },
+                    {
+                      "x": 0.525115683351877,
+                      "y": 0.3690740411931818
+                    },
+                    {
+                      "x": 0.5572620309174245,
+                      "y": 0.380144944204115
+                    },
+                    {
+                      "x": 0.5799554877975038,
+                      "y": 0.38716583672305444
+                    },
+                    {
+                      "x": 0.6063151167642221,
+                      "y": 0.3955136974324208
+                    },
+                    {
+                      "x": 0.6160271706595879,
+                      "y": 0.39682435595299587
+                    },
+                    {
+                      "x": 0.62222752999226,
+                      "y": 0.39925533746556474
+                    },
+                    {
+                      "x": 0.6236428653492647,
+                      "y": 0.39925533746556474
+                    }
+                  ],
+                  "brushSize": 80,
+                  "brushStrength": 0.45,
+                  "brushFeather": 48
+                },
+                {
+                  "points": [
+                    {
+                      "x": 0.7953725525469234,
+                      "y": 0.4432399949423209
+                    },
+                    {
+                      "x": 0.7899642330205109,
+                      "y": 0.4528647178460744
+                    },
+                    {
+                      "x": 0.7734887090629837,
+                      "y": 0.4752143460528581
+                    },
+                    {
+                      "x": 0.7466499635678696,
+                      "y": 0.504584698637655
+                    },
+                    {
+                      "x": 0.7083570167376161,
+                      "y": 0.5310514255660296
+                    },
+                    {
+                      "x": 0.6583968124153444,
+                      "y": 0.5561827772576619
+                    },
+                    {
+                      "x": 0.5951967032701239,
+                      "y": 0.5772439415461432
+                    },
+                    {
+                      "x": 0.5210302961130998,
+                      "y": 0.5930633124569559
+                    },
+                    {
+                      "x": 0.44141862709824886,
+                      "y": 0.6070487702845213
+                    },
+                    {
+                      "x": 0.37269738731738583,
+                      "y": 0.6180463638515841
+                    },
+                    {
+                      "x": 0.3061629256965944,
+                      "y": 0.61995913502927
+                    },
+                    {
+                      "x": 0.2822878811012481,
+                      "y": 0.6217550482631715
+                    },
+                    {
+                      "x": 0.2702126517753483,
+                      "y": 0.6217550482631715
+                    },
+                    {
+                      "x": 0.26582241944115226,
+                      "y": 0.621125360494146
+                    },
+                    {
+                      "x": 0.26476087068256576,
+                      "y": 0.621125360494146
+                    }
+                  ],
+                  "brushSize": 80,
+                  "brushStrength": 0.45,
+                  "brushFeather": 48
+                },
+                {
+                  "points": [
+                    {
+                      "x": 0.7897724352384868,
+                      "y": 0.398918719331095
+                    },
+                    {
+                      "x": 0.7873485080967009,
+                      "y": 0.4075460302599862
+                    },
+                    {
+                      "x": 0.7742414444961784,
+                      "y": 0.4273911993694043
+                    },
+                    {
+                      "x": 0.7473945735777864,
+                      "y": 0.45677584393293735
+                    },
+                    {
+                      "x": 0.7020429014790538,
+                      "y": 0.4836282861462638
+                    },
+                    {
+                      "x": 0.6344935178018576,
+                      "y": 0.516240227649363
+                    },
+                    {
+                      "x": 0.54126855241994,
+                      "y": 0.5390614911544421
+                    },
+                    {
+                      "x": 0.4317078014645414,
+                      "y": 0.5610272536264636
+                    },
+                    {
+                      "x": 0.33303766870646284,
+                      "y": 0.5662678700176481
+                    },
+                    {
+                      "x": 0.2561485833796923,
+                      "y": 0.5662678700176481
+                    },
+                    {
+                      "x": 0.2121861696981424,
+                      "y": 0.5643751076101928
+                    },
+                    {
+                      "x": 0.18240304480396188,
+                      "y": 0.5552299226282713
+                    },
+                    {
+                      "x": 0.16428150850183823,
+                      "y": 0.5476363421143251
+                    },
+                    {
+                      "x": 0.16257474444598974,
+                      "y": 0.5468338054730544
+                    }
+                  ],
+                  "brushSize": 245,
+                  "brushStrength": 0.45,
+                  "brushFeather": 48
+                },
+                {
+                  "points": [
+                    {
+                      "x": 0.7650979812669311,
+                      "y": 0.3051460203060434
+                    },
+                    {
+                      "x": 0.7650979812669311,
+                      "y": 0.3129590247288223
+                    },
+                    {
+                      "x": 0.7570789443450078,
+                      "y": 0.33548318321711434
+                    },
+                    {
+                      "x": 0.7425544667908281,
+                      "y": 0.36303492354295797
+                    },
+                    {
+                      "x": 0.7236534095031927,
+                      "y": 0.3895900925985709
+                    },
+                    {
+                      "x": 0.7015955307904411,
+                      "y": 0.41275806269369836
+                    },
+                    {
+                      "x": 0.6644145386875967,
+                      "y": 0.4395691422391529
+                    },
+                    {
+                      "x": 0.6369946364647833,
+                      "y": 0.4504103647447486
+                    },
+                    {
+                      "x": 0.6060299710961687,
+                      "y": 0.45775291085571623
+                    },
+                    {
+                      "x": 0.571520353618421,
+                      "y": 0.4614266219546315
+                    },
+                    {
+                      "x": 0.5299212098490712,
+                      "y": 0.4614266219546315
+                    },
+                    {
+                      "x": 0.48832197159805535,
+                      "y": 0.4595338595471763
+                    },
+                    {
+                      "x": 0.4538124486019737,
+                      "y": 0.4558122282842631
+                    },
+                    {
+                      "x": 0.4252109586638932,
+                      "y": 0.4539944567299415
+                    },
+                    {
+                      "x": 0.40133591406854685,
+                      "y": 0.4504537451037362
+                    },
+                    {
+                      "x": 0.38336890253120165,
+                      "y": 0.4487499730974518
+                    },
+                    {
+                      "x": 0.3713099240518576,
+                      "y": 0.4472170322722968
+                    },
+                    {
+                      "x": 0.3627795523534249,
+                      "y": 0.4472170322722968
+                    },
+                    {
+                      "x": 0.35703629532096554,
+                      "y": 0.44658734450327137
+                    },
+                    {
+                      "x": 0.3549756501850329,
+                      "y": 0.44658734450327137
+                    },
+                    {
+                      "x": 0.35391414866727944,
+                      "y": 0.44658734450327137
+                    },
+                    {
+                      "x": 0.3528526471495259,
+                      "y": 0.44595765673424587
+                    },
+                    {
+                      "x": 0.3507920020135933,
+                      "y": 0.44595765673424587
+                    },
+                    {
+                      "x": 0.3445916426809211,
+                      "y": 0.44595765673424587
+                    },
+                    {
+                      "x": 0.3348959341137771,
+                      "y": 0.44595765673424587
+                    },
+                    {
+                      "x": 0.32520022554663314,
+                      "y": 0.44595765673424587
+                    },
+                    {
+                      "x": 0.3189998662139609,
+                      "y": 0.4446469982136708
+                    },
+                    {
+                      "x": 0.31612828493856426,
+                      "y": 0.4435268433626033
+                    },
+                    {
+                      "x": 0.31506678342081074,
+                      "y": 0.44289715559357784
+                    }
+                  ],
+                  "brushSize": 316,
+                  "brushStrength": 0.45,
+                  "brushFeather": 48
+                },
+                {
+                  "points": [
+                    {
+                      "x": 0.7619038395837364,
+                      "y": 0.4758398302987259
+                    },
+                    {
+                      "x": 0.7559479988027283,
+                      "y": 0.4671894840629304
+                    },
+                    {
+                      "x": 0.7223408701988197,
+                      "y": 0.4430241019929408
+                    },
+                    {
+                      "x": 0.5877592010025638,
+                      "y": 0.3943878257898588
+                    },
+                    {
+                      "x": 0.4237457369872291,
+                      "y": 0.36559049748192146
+                    },
+                    {
+                      "x": 0.2733453803756289,
+                      "y": 0.35629701220299587
+                    },
+                    {
+                      "x": 0.16650726034914376,
+                      "y": 0.35341272275309915
+                    },
+                    {
+                      "x": 0.11620153657423084,
+                      "y": 0.3591227886105372
+                    },
+                    {
+                      "x": 0.09232649197888448,
+                      "y": 0.36777498439652206
+                    },
+                    {
+                      "x": 0.09061972792303599,
+                      "y": 0.3692072088068182
+                    }
+                  ],
+                  "brushSize": 316,
+                  "brushStrength": 0.45,
+                  "brushFeather": 48
+                },
+                {
+                  "points": [
+                    {
+                      "x": 0.8346176856073433,
+                      "y": 0.7212248662943354
+                    },
+                    {
+                      "x": 0.8319117306924826,
+                      "y": 0.7204223296530647
+                    },
+                    {
+                      "x": 0.8210180890818498,
+                      "y": 0.7159033741175964
+                    },
+                    {
+                      "x": 0.7935981868590364,
+                      "y": 0.706891188608385
+                    },
+                    {
+                      "x": 0.7421108753688564,
+                      "y": 0.6893441696797521
+                    },
+                    {
+                      "x": 0.6679444682118324,
+                      "y": 0.659889242209022
+                    },
+                    {
+                      "x": 0.5937780610548085,
+                      "y": 0.6303058550705923
+                    },
+                    {
+                      "x": 0.5348416260521478,
+                      "y": 0.6059925089854511
+                    },
+                    {
+                      "x": 0.4873343547431308,
+                      "y": 0.5886945067686812
+                    },
+                    {
+                      "x": 0.44809838640431504,
+                      "y": 0.5754914086712294
+                    },
+                    {
+                      "x": 0.3921984031842589,
+                      "y": 0.5604811318978133
+                    },
+                    {
+                      "x": 0.3588704679034443,
+                      "y": 0.5493604591726928
+                    },
+                    {
+                      "x": 0.33026897796536375,
+                      "y": 0.54025815012698
+                    },
+                    {
+                      "x": 0.3099387909974845,
+                      "y": 0.5350578875581095
+                    },
+                    {
+                      "x": 0.30022673710211883,
+                      "y": 0.5306815155281508
+                    },
+                    {
+                      "x": 0.29887380688552145,
+                      "y": 0.5306815155281508
+                    }
+                  ],
+                  "brushSize": 316,
+                  "brushStrength": 0.45,
+                  "brushFeather": 48
+                },
+                {
+                  "points": [
+                    {
+                      "x": 0.8604940408523607,
+                      "y": 0.8087003513472796
+                    },
+                    {
+                      "x": 0.8482026374746033,
+                      "y": 0.8122410629734849
+                    },
+                    {
+                      "x": 0.8160562899090558,
+                      "y": 0.8158767742230544
+                    },
+                    {
+                      "x": 0.7697307007969717,
+                      "y": 0.8177799613679407
+                    },
+                    {
+                      "x": 0.7198601595757547,
+                      "y": 0.8158507123794766
+                    },
+                    {
+                      "x": 0.6711713005514706,
+                      "y": 0.8158507123794766
+                    },
+                    {
+                      "x": 0.6272088868699207,
+                      "y": 0.8158507123794766
+                    },
+                    {
+                      "x": 0.592699269392173,
+                      "y": 0.8158507123794766
+                    },
+                    {
+                      "x": 0.5700059069937596,
+                      "y": 0.8193503976196626
+                    },
+                    {
+                      "x": 0.5567653407991486,
+                      "y": 0.822487402881801
+                    },
+                    {
+                      "x": 0.5486925438092589,
+                      "y": 0.8251088880638774
+                    }
+                  ],
+                  "brushSize": 316,
+                  "brushStrength": 0.45,
+                  "brushFeather": 48
+                }
+              ]
+            }
+          },
+          {
+            "id": "layer-1",
+            "kind": "texture",
+            "name": "图层1",
+            "visible": true,
+            "settings": {
+              "textureType": "gradient",
+              "enabled": true,
+              "animEnabled": false,
+              "animType": "vortex",
+              "speed": 2,
+              "directionDeg": 18,
+              "coherence": 1,
+              "spotCount": 7,
+              "spotSize": 100,
+              "spotBlur": 0,
+              "spotType": "gaussian",
+              "spotScale": 1,
+              "spotOffsetX": 0,
+              "spotOffsetY": 0,
+              "spotMaskEnabled": false,
+              "spotMaskBrush": "black",
+              "spotMaskBrushSize": 36,
+              "spotMaskBrushOpacity": 1,
+              "spotMaskFeather": 10,
+              "randomness": 0.36,
+              "dotEnabled": true,
+              "dotColor": "#000000",
+              "dotOpacity": 1,
+              "dotSpacing": 11,
+              "dotTileType": "square",
+              "dotMinSize": 0.28,
+              "dotMaxSize": 1.2,
+              "dotYOffsetMap": 0,
+              "dotTurbulenceEnabled": false,
+              "dotTurbulenceStrength": 0,
+              "dotTurbulenceSmoothness": 72,
+              "dotTurbulenceSeed": 173,
+              "contrast": 1.08,
+              "threshold": 0.08,
+              "fadeEdgeTop": 0.32,
+              "fadeEdgeBottom": 0.32,
+              "fadeEdgeLeft": 0.32,
+              "fadeEdgeRight": 0.32,
+              "symbol": "circle",
+              "dotSymbolChars": "01{}[]()<>/\\=+-*;:._#$&|!?",
+              "seed": 26,
+              "mouseInteractive": true,
+              "mouseInteractionRadius": 20,
+              "mouseInteractionInitialSpeed": 4,
+              "mouseInteractionFinalSpeed": 0,
+              "mouseInteractionDuration": 2,
+              "mouseInteractionArea": 0.5,
+              "mouseInteractionChars": "01{}[]()<>/\\=+-*;:._#$&|!?",
+              "activationEnabled": false,
+              "activationShowTexture": false,
+              "activationType": "ripple",
+              "activationOffsetX": 0,
+              "activationOffsetY": 0,
+              "activationRadiusX": 300,
+              "activationRadiusY": 300,
+              "activationInitialSpeed": 4,
+              "activationFinalSpeed": 0,
+              "activationDuration": 3,
+              "activationRippleInterval": 1,
+              "activationRingWidth": 80,
+              "activationChars": "01{}[]()<>/\\=+-*;:._#$&|!?",
+              "gradientEnabled": true,
+              "gradientStops": [
+                {
+                  "position": 0.18258001865484777,
+                  "color": "#F94F1E",
+                  "opacity": 1
+                },
+                {
+                  "position": 0.5515864445612981,
+                  "color": "#ff964f",
+                  "opacity": 1
+                },
+                {
+                  "position": 0.8169000087640225,
+                  "color": "#ffb3a2",
+                  "opacity": 1
+                },
+                {
+                  "position": 1,
+                  "color": "#e8e7fd",
+                  "opacity": 1
+                }
+              ],
+              "gradientAngle": 90,
+              "gradientFadeEdgeTop": 0,
+              "gradientFadeEdgeBottom": 0,
+              "gradientFadeEdgeLeft": 0,
+              "gradientFadeEdgeRight": 0,
+              "gradientAnimType": "flow",
+              "gradientFlowScaleX": 0.1,
+              "gradientFlowScaleY": 0.1,
+              "gradientFlowRotation": 0,
+              "gradientFlowWarp": 1,
+              "gradientFlowSoftness": 0.04,
+              "gradientFlowComplexity": 3,
+              "gradientAnimEnabled": false,
+              "gradientAnimSpeed": 0.63,
+              "gradientAnimIntensity": 0.5,
+              "gradientAnimDirection": 0
+            },
+            "blendMode": "normal"
+          }
+        ],
+        "selectedLayerId": "filter-1782730329341-t2loao"
+      },
+      "createdAt": "2026-06-29T10:53:44.142Z",
+      "updatedAt": "2026-06-29T10:53:44.142Z"
     }
   ]
 }

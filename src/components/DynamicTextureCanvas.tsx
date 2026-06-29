@@ -420,6 +420,7 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
   const onFrameRef = useRef(onFrame);
   const frameVersionRef = useRef(0);
   const requestDrawRef = useRef<() => void>(() => {});
+  const requestDeferredDrawRef = useRef<() => void>(() => {});
   const interactionsRef = useRef<Array<{ x: number; y: number; start: number }>>([]);
   const lastInteractionRef = useRef({ x: -9999, y: -9999, at: 0 });
   const tmpCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -535,13 +536,27 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
     if (!canvas || !parent || !ctx) return;
 
     let animationFrame = 0;
+    let deferredFrame = 0;
     let width = Math.max(1, Math.round(outputWidth * renderScale));
     let height = Math.max(1, Math.round(outputHeight * renderScale));
     const scheduleDraw = () => {
       if (animationFrame) return;
       animationFrame = requestAnimationFrame(draw);
     };
+    // Defers a settings-triggered redraw by one painted frame so a loading
+    // overlay has a chance to render before the (potentially heavy) synchronous
+    // draw blocks the main thread. Falls back to a plain draw while animating.
+    const scheduleDeferredDraw = () => {
+      if (animationFrame || deferredFrame) return;
+      deferredFrame = requestAnimationFrame(() => {
+        deferredFrame = requestAnimationFrame(() => {
+          deferredFrame = 0;
+          draw(performance.now());
+        });
+      });
+    };
     requestDrawRef.current = scheduleDraw;
+    requestDeferredDrawRef.current = scheduleDeferredDraw;
     const initialNow = performance.now();
     animationTimeRef.current = initialNow;
     lastWallNowRef.current = initialNow;
@@ -1282,17 +1297,19 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
       window.removeEventListener('pointercancel', onMaskPointerUp);
       window.removeEventListener('pointermove', onPointerMove);
       cancelAnimationFrame(animationFrame);
+      if (deferredFrame) cancelAnimationFrame(deferredFrame);
       if (flowGLRef.current) {
         flowGLRef.current.lose?.loseContext();
         flowGLRef.current = null;
         flowGLInitRef.current = false;
       }
       requestDrawRef.current = () => {};
+      requestDeferredDrawRef.current = () => {};
     };
   }, [outputHeight, outputWidth, renderScale]);
 
   useEffect(() => {
-    requestDrawRef.current();
+    requestDeferredDrawRef.current();
   }, [settings]);
 
   return (
