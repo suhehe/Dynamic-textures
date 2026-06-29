@@ -1,4 +1,4 @@
-import type { SmudgeDistortionFilter, SmudgeDistortionStroke } from './texture';
+import type { SmudgeDistortionFilter, SmudgeDistortionStroke, TextureFilter } from './texture';
 
 type BlendMode =
   | 'pass-through'
@@ -23,7 +23,7 @@ type BlendMode =
 
 export type WebGLCompositeLayer =
   | { kind: 'texture'; id: string; blendMode: BlendMode; canvas: HTMLCanvasElement | null }
-  | { kind: 'filter'; id: string; filter: SmudgeDistortionFilter };
+  | { kind: 'filter'; id: string; filter: TextureFilter };
 
 type FramebufferTarget = {
   texture: WebGLTexture;
@@ -34,6 +34,7 @@ type DisplacementCache = {
   key: string;
   texture: WebGLTexture;
   range: number;
+  packed: boolean;
 };
 
 type Renderer = {
@@ -130,9 +131,16 @@ uniform sampler2D u_tex;
 uniform sampler2D u_disp;
 uniform vec2 u_size;
 uniform float u_dispRange;
+uniform bool u_dispPacked;
+float decode16(vec2 rg) {
+  vec2 bytes = floor(rg * 255.0 + 0.5);
+  return (bytes.x * 256.0 + bytes.y) / 65535.0;
+}
 void main() {
   vec2 dispUv = vec2(v_uv.x, 1.0 - v_uv.y);
-  vec2 disp = (texture2D(u_disp, dispUv).rg * 2.0 - 1.0) * u_dispRange;
+  vec4 packed = texture2D(u_disp, dispUv);
+  vec2 disp = u_dispPacked ? vec2(decode16(packed.rg), decode16(packed.ba)) : packed.rg;
+  disp = (disp * 2.0 - 1.0) * u_dispRange;
   vec2 dispUvOffset = vec2(disp.x, -disp.y) * max(u_size.x, u_size.y) / u_size;
   vec2 sampleUv = clamp(v_uv - dispUvOffset, vec2(0.0), vec2(1.0));
   gl_FragColor = texture2D(u_tex, sampleUv);
@@ -390,6 +398,7 @@ function getDisplacementTexture(renderer: Renderer, filterId: string, filter: Sm
   const { gl } = renderer;
   const texture = cached?.texture ?? createTexture(gl);
   if (!texture) return null;
+  const supportsFloatDisplacement = Boolean(gl.getExtension('OES_texture_float') && gl.getExtension('OES_texture_float_linear'));
   const precision = Math.max(1, Math.min(4, Math.round(filter.precision)));
   const fieldWidth = width * precision;
   const fieldHeight = height * precision;
@@ -406,18 +415,32 @@ function getDisplacementTexture(renderer: Renderer, filterId: string, filter: Sm
   }
   range = Math.max(1 / 255, Math.min(1, range));
 
-  const data = new Uint8Array(fieldSize * 4);
-  for (let i = 0; i < fieldSize; i += 1) {
-    const idx = i * 4;
-    data[idx] = Math.round((clamp(dxField[i], -range, range) / range * 0.5 + 0.5) * 255);
-    data[idx + 1] = Math.round((clamp(dyField[i], -range, range) / range * 0.5 + 0.5) * 255);
-    data[idx + 2] = 128;
-    data[idx + 3] = 255;
-  }
   gl.bindTexture(gl.TEXTURE_2D, texture);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fieldWidth, fieldHeight, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
-  const nextCache = { key, texture, range };
+  if (supportsFloatDisplacement) {
+    const data = new Float32Array(fieldSize * 4);
+    for (let i = 0; i < fieldSize; i += 1) {
+      const idx = i * 4;
+      data[idx] = clamp(dxField[i], -range, range) / range * 0.5 + 0.5;
+      data[idx + 1] = clamp(dyField[i], -range, range) / range * 0.5 + 0.5;
+      data[idx + 2] = 0.5;
+      data[idx + 3] = 1;
+    }
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fieldWidth, fieldHeight, 0, gl.RGBA, gl.FLOAT, data);
+  } else {
+    const data = new Uint8Array(fieldSize * 4);
+    for (let i = 0; i < fieldSize; i += 1) {
+      const idx = i * 4;
+      const dx = Math.round((clamp(dxField[i], -range, range) / range * 0.5 + 0.5) * 65535);
+      const dy = Math.round((clamp(dyField[i], -range, range) / range * 0.5 + 0.5) * 65535);
+      data[idx] = dx >> 8;
+      data[idx + 1] = dx & 255;
+      data[idx + 2] = dy >> 8;
+      data[idx + 3] = dy & 255;
+    }
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fieldWidth, fieldHeight, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  }
+  const nextCache = { key, texture, range, packed: !supportsFloatDisplacement };
   renderer.displacementCache.set(filterId, nextCache);
   return nextCache;
 }
@@ -450,6 +473,7 @@ function drawSmudge(
   input: WebGLTexture,
   displacement: WebGLTexture,
   displacementRange: number,
+  displacementPacked: boolean,
   output: WebGLFramebuffer,
   width: number,
   height: number,
@@ -466,6 +490,7 @@ function drawSmudge(
   gl.uniform1i(gl.getUniformLocation(smudgeProgram, 'u_disp'), 1);
   gl.uniform2f(gl.getUniformLocation(smudgeProgram, 'u_size'), width, height);
   gl.uniform1f(gl.getUniformLocation(smudgeProgram, 'u_dispRange'), displacementRange);
+  gl.uniform1i(gl.getUniformLocation(smudgeProgram, 'u_dispPacked'), displacementPacked ? 1 : 0);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
@@ -478,6 +503,9 @@ export function drawLayerStackWebGL(
   try {
     const renderer = getRenderer(output);
     if (!renderer || width <= 0 || height <= 0) return false;
+    if (layers.some(layer => layer.kind === 'filter' && layer.filter.type !== 'smudgeDistortion')) {
+      return false;
+    }
     if (layers.some(layer => layer.kind === 'texture' && blendModeToUniform(layer.blendMode) === null)) {
       return false;
     }
@@ -513,10 +541,16 @@ export function drawLayerStackWebGL(
         continue;
       }
 
-      if (!hasDrawnLayer || !layer.filter.enabled || layer.filter.strength <= 0 || layer.filter.strokes.length === 0) continue;
+      if (
+        !hasDrawnLayer ||
+        layer.filter.type !== 'smudgeDistortion' ||
+        !layer.filter.enabled ||
+        layer.filter.strength <= 0 ||
+        layer.filter.strokes.length === 0
+      ) continue;
       const displacement = getDisplacementTexture(renderer, layer.id, layer.filter, width, height);
       if (!displacement) return false;
-      drawSmudge(renderer, targets[currentTarget].texture, displacement.texture, displacement.range, targets[scratchTarget].framebuffer, width, height);
+      drawSmudge(renderer, targets[currentTarget].texture, displacement.texture, displacement.range, displacement.packed, targets[scratchTarget].framebuffer, width, height);
       [currentTarget, scratchTarget] = [scratchTarget, currentTarget];
     }
 

@@ -130,6 +130,27 @@ export interface SmudgeDistortionFilter {
   strokes: SmudgeDistortionStroke[];
 }
 
+export interface PaintMaskStroke {
+  points: SmudgeDistortionPoint[];
+  brush: TextureMaskBrush;
+  brushSize: number;
+  brushOpacity: number;
+  brushFeather: number;
+}
+
+export interface PaintMaskFilter {
+  type: 'paintMask';
+  enabled: boolean;
+  brushEnabled: boolean;
+  brush: TextureMaskBrush;
+  brushSize: number;
+  brushOpacity: number;
+  brushFeather: number;
+  strokes: PaintMaskStroke[];
+}
+
+export type TextureFilter = SmudgeDistortionFilter | PaintMaskFilter;
+
 export interface TexturePresetTextureLayer {
   id: string;
   kind: 'texture';
@@ -144,7 +165,7 @@ export interface TexturePresetFilterLayer {
   kind: 'filter';
   name: string;
   visible: boolean;
-  filter: SmudgeDistortionFilter;
+  filter: TextureFilter;
 }
 
 export type TexturePresetLayer = TexturePresetTextureLayer | TexturePresetFilterLayer;
@@ -359,6 +380,45 @@ export function sanitizeSmudgeDistortionFilter(raw: unknown): SmudgeDistortionFi
   };
 }
 
+export function sanitizePaintMaskFilter(raw: unknown): PaintMaskFilter {
+  const input = raw && typeof raw === 'object' ? raw as Partial<PaintMaskFilter> : {};
+  const strokes = Array.isArray(input.strokes)
+    ? input.strokes.map(item => {
+        if (!item || typeof item !== 'object') return null;
+        const stroke = item as Partial<PaintMaskStroke>;
+        const points = Array.isArray(stroke.points)
+          ? stroke.points.map(sanitizeSmudgePoint).filter((point): point is SmudgeDistortionPoint => point !== null).slice(0, 400)
+          : [];
+        if (points.length < 1) return null;
+        return {
+          points,
+          brush: stroke.brush === 'white' ? 'white' : 'black',
+          brushSize: clampSetting(stroke.brushSize, 4, 400, 44),
+          brushOpacity: clampSetting(stroke.brushOpacity, 0, 1, 1),
+          brushFeather: clampSetting(stroke.brushFeather, 0, 400, 10),
+        };
+      }).filter((item): item is PaintMaskStroke => item !== null).slice(-80)
+    : [];
+
+  return {
+    type: 'paintMask',
+    enabled: typeof input.enabled === 'boolean' ? input.enabled : true,
+    brushEnabled: typeof input.brushEnabled === 'boolean' ? input.brushEnabled : true,
+    brush: input.brush === 'white' ? 'white' : 'black',
+    brushSize: clampSetting(input.brushSize, 4, 400, 44),
+    brushOpacity: clampSetting(input.brushOpacity, 0, 1, 1),
+    brushFeather: clampSetting(input.brushFeather, 0, 400, 10),
+    strokes,
+  };
+}
+
+export function sanitizeTextureFilter(raw: unknown): TextureFilter {
+  const input = raw && typeof raw === 'object' ? raw as Partial<TextureFilter> : {};
+  return input.type === 'paintMask'
+    ? sanitizePaintMaskFilter(input)
+    : sanitizeSmudgeDistortionFilter(input);
+}
+
 export function sanitizeGradientStops(raw: unknown, fallback = TEXTURE_DEFAULTS.gradientStops): GradientColorStop[] {
   if (!Array.isArray(raw) || raw.length < 2) return fallback;
   const stops = raw.map((item: unknown) => {
@@ -397,7 +457,7 @@ export function sanitizeTextureSettings(raw: unknown): TextureSettings {
     spotScale: clampSetting(input.spotScale, 0.1, 10, defaults.spotScale),
     spotOffsetX: clampSetting(input.spotOffsetX, -400, 400, defaults.spotOffsetX),
     spotOffsetY: clampSetting(input.spotOffsetY, -400, 400, defaults.spotOffsetY),
-    spotMaskEnabled: typeof input.spotMaskEnabled === 'boolean' ? input.spotMaskEnabled : defaults.spotMaskEnabled,
+    spotMaskEnabled: false,
     spotMaskBrush: input.spotMaskBrush === 'white' ? 'white' : defaults.spotMaskBrush,
     spotMaskBrushSize: clampSetting(input.spotMaskBrushSize, 4, 200, defaults.spotMaskBrushSize),
     spotMaskBrushOpacity: clampSetting(input.spotMaskBrushOpacity, 0, 1, defaults.spotMaskBrushOpacity),
@@ -473,21 +533,20 @@ export function sanitizePresetLayerState(raw: unknown): TexturePresetLayerState 
         if (!item || typeof item !== 'object') return null;
         const layer = item as Partial<TexturePresetLayer> & { settings?: unknown; blendMode?: unknown; filter?: unknown; kind?: unknown; visible?: unknown };
         const id = typeof layer.id === 'string' && layer.id.trim() ? layer.id.trim() : `layer-${index + 1}`;
-        const name = typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `图层${index + 1}`;
         const visible = layer.visible !== false;
         if (layer.kind === 'filter') {
           return {
             id,
             kind: 'filter',
-            name,
+            name: typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `滤镜${index + 1}`,
             visible,
-            filter: sanitizeSmudgeDistortionFilter(layer.filter),
+            filter: sanitizeTextureFilter(layer.filter),
           };
         }
         return {
           id,
           kind: 'texture',
-          name,
+          name: typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `图层${index + 1}`,
           visible,
           settings: sanitizeTextureSettings(layer.settings),
           blendMode: typeof layer.blendMode === 'string' && layer.blendMode.trim() ? layer.blendMode.trim() : 'normal',

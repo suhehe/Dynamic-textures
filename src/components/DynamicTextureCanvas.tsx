@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import type { TextureSettings, TextureSpotType, TextureAnimType, TextureActivationType } from '../texture';
+import { renderHalftoneWebGL } from '../halftoneWebGL';
 
 function clamp01(value: number) {
   return Math.min(1, Math.max(0, value));
@@ -423,6 +424,7 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
   const lastInteractionRef = useRef({ x: -9999, y: -9999, at: 0 });
   const tmpCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const actTexCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const halftoneGLCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const spotMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const spotMaskDataRef = useRef<{ data: Uint8ClampedArray; width: number; height: number } | null>(null);
   const spotMaskHistoryRef = useRef<MaskSnapshot[]>([]);
@@ -745,6 +747,32 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
       const effectiveNow = animationTimeRef.current;
       const isGradientTexture = current.textureType === 'gradient';
       const isHalftoneTexture = current.textureType === 'halftone';
+
+      if (isHalftoneTexture) {
+        if (!halftoneGLCanvasRef.current) halftoneGLCanvasRef.current = document.createElement('canvas');
+        const renderedWithWebGL = renderHalftoneWebGL(
+          halftoneGLCanvasRef.current,
+          current,
+          width,
+          height,
+          effectiveNow,
+          current.spotMaskEnabled ? ensureSpotMaskCanvas() : null,
+        );
+        if (renderedWithWebGL) {
+          ctx.save();
+          ctx.globalAlpha = 1;
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(halftoneGLCanvasRef.current, 0, 0, width, height);
+          ctx.restore();
+          frameVersionRef.current += 1;
+          onFrameRef.current?.();
+          if (needsContinuousDraw(current, interactionsRef.current.length)) {
+            scheduleDraw();
+          }
+          return;
+        }
+      }
 
       if (isGradientTexture && current.gradientStops.length >= 2) {
         const gradAnimType = current.gradientAnimType || 'none';

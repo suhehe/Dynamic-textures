@@ -7,16 +7,21 @@ import eyeClosedIcon from './assets/eye_close.svg';
 import {
   TEXTURE_DEFAULTS,
   getTextureDefaults,
+  sanitizePaintMaskFilter,
   readPresetFile,
   sanitizeSmudgeDistortionFilter,
+  sanitizeTextureFilter,
   sanitizeTextureSettings,
   writePresetFile,
   type GradientColorStop,
+  type PaintMaskFilter,
+  type PaintMaskStroke,
   type SmudgeDistortionFilter,
   type SmudgeDistortionPoint,
   type SmudgeDistortionStroke,
   type TextureActivationType,
   type TextureAnimType,
+  type TextureFilter,
   type TextureGradientAnimType,
   type TextureMaskBrush,
   type TexturePreset,
@@ -77,7 +82,7 @@ interface FilterLayer {
   id: string;
   name: string;
   visible: boolean;
-  filter: SmudgeDistortionFilter;
+  filter: TextureFilter;
 }
 
 type Layer = TextureLayer | FilterLayer;
@@ -96,6 +101,17 @@ function reorderTextureLayerToIndex(layers: Layer[], fromId: string, toIndex: nu
   if (boundedIndex === fromIndex) return layers;
   nextLayers.splice(boundedIndex, 0, moved);
   return nextLayers;
+}
+
+function reorderIdsToIndex(ids: string[], fromId: string, toIndex: number) {
+  const fromIndex = ids.indexOf(fromId);
+  if (fromIndex < 0) return ids;
+  const nextIds = [...ids];
+  const [moved] = nextIds.splice(fromIndex, 1);
+  const boundedIndex = clamp(toIndex, 0, nextIds.length);
+  if (boundedIndex === fromIndex) return ids;
+  nextIds.splice(boundedIndex, 0, moved);
+  return nextIds;
 }
 
 const BLEND_MODE_GROUPS: Array<{ title: string; options: Array<{ value: TextureLayerBlendMode; label: string }> }> = [
@@ -173,7 +189,7 @@ function createSmudgeFilterLayer(index: number): FilterLayer {
   return {
     kind: 'filter',
     id: `filter-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    name: `涂抹畸变${index}`,
+    name: `滤镜${index}`,
     visible: true,
     filter: sanitizeSmudgeDistortionFilter({
       enabled: true,
@@ -186,6 +202,18 @@ function createSmudgeFilterLayer(index: number): FilterLayer {
       strokes: [],
     }),
   };
+}
+
+function createPaintMaskFilter(): PaintMaskFilter {
+  return sanitizePaintMaskFilter({
+    enabled: true,
+    brushEnabled: true,
+    brush: 'black',
+    brushSize: 44,
+    brushOpacity: 1,
+    brushFeather: 10,
+    strokes: [],
+  });
 }
 
 function sanitizeBlendMode(value: unknown): TextureLayerBlendMode {
@@ -201,21 +229,20 @@ function sanitizeTextureLayerState(raw: unknown): TextureLayerState {
         if (!item || typeof item !== 'object') return null;
         const layer = item as Partial<Layer> & { settings?: unknown; blendMode?: unknown; filter?: unknown; kind?: unknown; visible?: unknown };
         const id = typeof layer.id === 'string' && layer.id.trim() ? layer.id.trim() : `layer-${index + 1}`;
-        const name = typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `图层${index + 1}`;
         const visible = layer.visible !== false;
         if (layer.kind === 'filter') {
           return {
             kind: 'filter',
             id,
-            name,
+            name: typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `滤镜${index + 1}`,
             visible,
-            filter: sanitizeSmudgeDistortionFilter(layer.filter),
+            filter: sanitizeTextureFilter(layer.filter),
           };
         }
         return {
           kind: 'texture',
           id,
-          name,
+          name: typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `图层${index + 1}`,
           visible,
           settings: sanitizeTextureSettings(layer.settings),
           blendMode: sanitizeBlendMode(layer.blendMode),
@@ -287,6 +314,25 @@ function areTextureLayerStatesEqual(a: TextureLayerState, b: TextureLayerState) 
 
 function serializeTextureLayerState(value: TextureLayerState) {
   return JSON.stringify(sanitizeTextureLayerState(value));
+}
+
+function getCompositeLayerSignature(layers: Layer[]) {
+  return JSON.stringify(layers.map(layer => (
+    layer.kind === 'texture'
+      ? {
+        kind: layer.kind,
+        id: layer.id,
+        visible: layer.visible,
+        blendMode: layer.blendMode,
+        settings: layer.settings,
+      }
+      : {
+        kind: layer.kind,
+        id: layer.id,
+        visible: layer.visible,
+        filter: layer.filter,
+      }
+  )));
 }
 
 function createPresetFromLayerState(
@@ -378,6 +424,7 @@ function drawLayerStack(
   });
   const hasActiveSmudgeFilter = visibleLayers.some(layer => (
     layer.kind === 'filter' &&
+    layer.filter.type === 'smudgeDistortion' &&
     layer.filter.enabled &&
     layer.filter.strength > 0 &&
     layer.filter.strokes.length > 0
@@ -403,8 +450,14 @@ function drawLayerStack(
       continue;
     }
 
-    if (!hasDrawnLayer || !layer.filter.enabled || layer.filter.strength <= 0 || layer.filter.strokes.length === 0) continue;
-    applySmudgeDistortion(outputCtx, width, height, layer.filter);
+    if (!hasDrawnLayer || !layer.filter.enabled) continue;
+    if (layer.filter.type === 'smudgeDistortion') {
+      if (layer.filter.strength <= 0 || layer.filter.strokes.length === 0) continue;
+      applySmudgeDistortion(outputCtx, width, height, layer.filter);
+      continue;
+    }
+    if (layer.filter.strokes.length === 0) continue;
+    applyPaintMask(outputCtx, width, height, layer.filter);
   }
   outputCtx.globalCompositeOperation = 'source-over';
   outputCtx.globalAlpha = 1;
@@ -527,6 +580,75 @@ function applySmudgeDistortion(
   ctx.putImageData(output, 0, 0);
 }
 
+function applyPaintMask(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  filter: PaintMaskFilter,
+) {
+  if (!filter.enabled || filter.strokes.length === 0) return;
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = width;
+  maskCanvas.height = height;
+  const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true });
+  if (!maskCtx) return;
+
+  maskCtx.clearRect(0, 0, width, height);
+  maskCtx.fillStyle = '#ffffff';
+  maskCtx.fillRect(0, 0, width, height);
+
+  const paintSegment = (stroke: PaintMaskStroke, from: SmudgeDistortionPoint, to: SmudgeDistortionPoint) => {
+    const radius = Math.max(2, stroke.brushSize / 2);
+    const feather = Math.max(0, stroke.brushFeather);
+    const spread = radius + feather;
+    const innerRadius = Math.max(0, radius - feather);
+    const opacity = clamp(stroke.brushOpacity, 0, 1);
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const distance = Math.hypot(dx, dy);
+    const step = Math.max(1, spread * 0.2);
+    const steps = Math.max(1, Math.ceil(distance / step));
+
+    for (let i = 0; i <= steps; i += 1) {
+      const t = steps <= 1 ? 0 : i / steps;
+      const x = (from.x + dx * t) * width;
+      const y = (from.y + dy * t) * height;
+      const gradient = maskCtx.createRadialGradient(x, y, innerRadius, x, y, spread);
+      const color = stroke.brush === 'white' ? '255,255,255' : '0,0,0';
+      gradient.addColorStop(0, `rgba(${color},${opacity})`);
+      gradient.addColorStop(1, `rgba(${color},0)`);
+      maskCtx.fillStyle = gradient;
+      maskCtx.beginPath();
+      maskCtx.arc(x, y, spread, 0, Math.PI * 2);
+      maskCtx.fill();
+    }
+  };
+
+  for (const stroke of filter.strokes) {
+    if (stroke.points.length === 0) continue;
+    if (stroke.points.length === 1) {
+      paintSegment(stroke, stroke.points[0], stroke.points[0]);
+      continue;
+    }
+    for (let i = 1; i < stroke.points.length; i += 1) {
+      paintSegment(stroke, stroke.points[i - 1], stroke.points[i]);
+    }
+  }
+
+  const source = ctx.getImageData(0, 0, width, height);
+  const mask = maskCtx.getImageData(0, 0, width, height).data;
+  const data = source.data;
+  for (let i = 0; i < width * height; i += 1) {
+    const alpha = mask[i * 4] / 255;
+    const idx = i * 4;
+    data[idx] = Math.round(data[idx] * alpha);
+    data[idx + 1] = Math.round(data[idx + 1] * alpha);
+    data[idx + 2] = Math.round(data[idx + 2] * alpha);
+    data[idx + 3] = Math.round(data[idx + 3] * alpha);
+  }
+  ctx.putImageData(source, 0, 0);
+}
+
 function PanelGroup({ title, children, defaultOpen = true }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
@@ -647,6 +769,8 @@ export default function App() {
   const [presets, setPresets] = useState<TexturePreset[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draggingLayerId, setDraggingLayerId] = useState<string | null>(null);
+  const [dragPreviewOrder, setDragPreviewOrder] = useState<string[] | null>(null);
+  const [serializedLayerState, setSerializedLayerState] = useState(() => serializeTextureLayerState(loadLocalLayerState()));
   const [canvasWidth, setCanvasWidth] = useState(1920);
   const [canvasHeight, setCanvasHeight] = useState(1080);
   const [canvasWidthInput, setCanvasWidthInput] = useState('1920');
@@ -658,6 +782,9 @@ export default function App() {
   const smudgePaintingRef = useRef(false);
   const smudgeStrokeRef = useRef<SmudgeDistortionStroke | null>(null);
   const lastSmudgePointRef = useRef<SmudgeDistortionPoint | null>(null);
+  const paintMaskPaintingRef = useRef(false);
+  const paintMaskStrokeRef = useRef<PaintMaskStroke | null>(null);
+  const lastPaintMaskPointRef = useRef<SmudgeDistortionPoint | null>(null);
   const layerRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const selectedIdRef = useRef<string | null>(null);
   const stageViewportRef = useRef<HTMLDivElement>(null);
@@ -666,6 +793,7 @@ export default function App() {
   const lastCompositeSignatureRef = useRef('');
   const pendingProcessingCommitRef = useRef(false);
   const processingCommitTimeoutRef = useRef(0);
+  const dragPreviewOrderRef = useRef<string[] | null>(null);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [processingTask, setProcessingTask] = useState<string | null>(null);
   const selectedLayer = useMemo(
@@ -676,6 +804,13 @@ export default function App() {
   const selectedFilterLayer = selectedLayer?.kind === 'filter' ? selectedLayer : null;
   const settings = selectedTextureLayer?.settings ?? TEXTURE_DEFAULTS;
   const filterSettings = selectedFilterLayer?.filter ?? null;
+  const displayedLayers = useMemo(() => {
+    if (!dragPreviewOrder) return layerState.layers;
+    const layerMap = new Map(layerState.layers.map(layer => [layer.id, layer]));
+    return dragPreviewOrder
+      .map(id => layerMap.get(id))
+      .filter((layer): layer is Layer => Boolean(layer));
+  }, [dragPreviewOrder, layerState.layers]);
 
   useEffect(() => {
     readPresetFile().then(file => {
@@ -692,6 +827,10 @@ export default function App() {
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    dragPreviewOrderRef.current = dragPreviewOrder;
+  }, [dragPreviewOrder]);
 
   useEffect(() => {
     setCanvasWidthInput(String(canvasWidth));
@@ -723,7 +862,7 @@ export default function App() {
     () => presets.find(preset => preset.id === selectedId) ?? null,
     [presets, selectedId],
   );
-  const serializedLayerState = useMemo(() => serializeTextureLayerState(layerState), [layerState]);
+  const compositeLayerSignature = useMemo(() => getCompositeLayerSignature(layerState.layers), [layerState.layers]);
   const hasContinuousComposite = useMemo(
     () => layerState.layers.some(layer => layer.kind === 'texture' && layer.visible !== false && textureNeedsContinuousComposite(layer.settings)),
     [layerState.layers],
@@ -743,10 +882,12 @@ export default function App() {
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
-      localStorage.setItem(STORAGE_KEY, serializedLayerState);
-    }, 250);
+      const nextSerializedState = serializeTextureLayerState(layerState);
+      setSerializedLayerState(current => current === nextSerializedState ? current : nextSerializedState);
+      localStorage.setItem(STORAGE_KEY, nextSerializedState);
+    }, 120);
     return () => window.clearTimeout(timeout);
-  }, [serializedLayerState]);
+  }, [layerState]);
 
   const drawComposite = useCallback(() => {
     const canvas = compositeCanvasRef.current;
@@ -755,7 +896,7 @@ export default function App() {
       if (layer.kind === 'filter') return `${layer.id}:filter:${layer.visible}`;
       return `${layer.id}:${layer.visible}:${layerCanvasRefs.current[layer.id]?.getFrameVersion() ?? 0}`;
     }).join('|');
-    const signature = `${canvasWidth}x${canvasHeight}:${serializedLayerState}:${sourceVersions}`;
+    const signature = `${canvasWidth}x${canvasHeight}:${compositeLayerSignature}:${sourceVersions}`;
     if (signature === lastCompositeSignatureRef.current) return;
     try {
       drawLayerStack(canvas, layerState.layers, layerCanvasRefs.current, canvasWidth, canvasHeight);
@@ -773,7 +914,7 @@ export default function App() {
         setProcessingTask(null);
       }
     }
-  }, [canvasHeight, canvasWidth, layerState.layers, serializedLayerState]);
+  }, [canvasHeight, canvasWidth, compositeLayerSignature, layerState.layers]);
 
   const requestCompositeDraw = useCallback(() => {
     if (compositeFrameRef.current) {
@@ -869,11 +1010,21 @@ export default function App() {
     );
   };
 
-  const updateSelectedFilterSettings = (patch: Partial<SmudgeDistortionFilter>) => {
+  const setSelectedFilterState = (nextFilter: TextureFilter) => {
     setLayerState(prev => updateSelectedFilter(prev, layer => ({
       ...layer,
-      filter: sanitizeSmudgeDistortionFilter({ ...layer.filter, ...patch }),
+      filter: sanitizeTextureFilter(nextFilter),
     })));
+  };
+
+  const updateSelectedSmudgeFilterSettings = (patch: Partial<SmudgeDistortionFilter>) => {
+    if (!filterSettings || filterSettings.type !== 'smudgeDistortion') return;
+    setSelectedFilterState({ ...filterSettings, ...patch });
+  };
+
+  const updateSelectedPaintMaskSettings = (patch: Partial<PaintMaskFilter>) => {
+    if (!filterSettings || filterSettings.type !== 'paintMask') return;
+    setSelectedFilterState({ ...filterSettings, ...patch });
   };
 
   const filterRange = (
@@ -884,11 +1035,28 @@ export default function App() {
     step: number,
     format: (value: number) => string = value => String(value),
   ) => {
-    const value = Number(filterSettings?.[key] ?? 0);
+    const value = Number(filterSettings && filterSettings.type === 'smudgeDistortion' ? filterSettings[key] : 0);
     return (
       <label className="field" key={key}>
         <span><span>{label}</span><b>{format(value)}</b></span>
-        <input type="range" min={min} max={max} step={step} value={value} onChange={event => updateSelectedFilterSettings({ [key]: Number(event.currentTarget.value) })} />
+        <input type="range" min={min} max={max} step={step} value={value} onChange={event => updateSelectedSmudgeFilterSettings({ [key]: Number(event.currentTarget.value) })} />
+      </label>
+    );
+  };
+
+  const paintMaskRange = (
+    key: Extract<keyof PaintMaskFilter, 'brushSize' | 'brushOpacity' | 'brushFeather'>,
+    label: string,
+    min: number,
+    max: number,
+    step: number,
+    format: (value: number) => string = value => String(value),
+  ) => {
+    const value = Number(filterSettings && filterSettings.type === 'paintMask' ? filterSettings[key] : 0);
+    return (
+      <label className="field" key={key}>
+        <span><span>{label}</span><b>{format(value)}</b></span>
+        <input type="range" min={min} max={max} step={step} value={value} onChange={event => updateSelectedPaintMaskSettings({ [key]: Number(event.currentTarget.value) })} />
       </label>
     );
   };
@@ -1005,8 +1173,34 @@ export default function App() {
   const updateFilterLayer = (id: string, patch: Partial<Pick<FilterLayer, 'name' | 'visible' | 'filter'>>) => {
     setLayerState(prev => ({
       ...prev,
-      layers: prev.layers.map(layer => layer.id === id && layer.kind === 'filter' ? { ...layer, ...patch } : layer),
+      layers: prev.layers.map(layer => (
+        layer.id === id && layer.kind === 'filter'
+          ? {
+              ...layer,
+              ...patch,
+              filter: patch.filter ? sanitizeTextureFilter(patch.filter) : layer.filter,
+            }
+          : layer
+      )),
     }));
+  };
+
+  const changeSelectedFilterType = (nextType: TextureFilter['type']) => {
+    if (!selectedFilterLayer) return;
+    updateFilterLayer(selectedFilterLayer.id, {
+      filter: nextType === 'paintMask'
+        ? createPaintMaskFilter()
+        : sanitizeSmudgeDistortionFilter({
+            enabled: true,
+            strength: 1,
+            precision: 2,
+            brushEnabled: true,
+            brushSize: 80,
+            brushStrength: 0.45,
+            brushFeather: 48,
+            strokes: [],
+          }),
+    });
   };
 
   const deleteLayer = (id: string) => {
@@ -1039,12 +1233,30 @@ export default function App() {
     return insertionIndex;
   };
 
-  const moveLayerToIndex = (fromId: string, toIndex: number) => {
-    setLayerState(prev => {
-      const layers = reorderTextureLayerToIndex(prev.layers, fromId, toIndex);
-      return layers === prev.layers ? prev : { ...prev, layers };
+  const previewLayerMoveToIndex = (fromId: string, toIndex: number, layers: Layer[]) => {
+    const currentIds = (dragPreviewOrderRef.current ?? layers.map(layer => layer.id)).filter(id => layers.some(layer => layer.id === id));
+    const nextIds = reorderIdsToIndex(currentIds, fromId, toIndex);
+    if (nextIds === currentIds) return;
+    setDragPreviewOrder(previous => {
+      if (previous && previous.length === nextIds.length && previous.every((id, index) => id === nextIds[index])) {
+        return previous;
+      }
+      return nextIds;
     });
   };
+
+  const finishLayerDrag = useCallback((draggedId: string, commitOrder: boolean) => {
+    const previewOrder = dragPreviewOrderRef.current;
+    setDraggingLayerId(null);
+    setDragPreviewOrder(null);
+    if (!commitOrder || !previewOrder) return;
+    const targetIndex = previewOrder.indexOf(draggedId);
+    if (targetIndex < 0) return;
+    setLayerState(prev => {
+      const layers = reorderTextureLayerToIndex(prev.layers, draggedId, targetIndex);
+      return layers === prev.layers ? prev : { ...prev, layers };
+    });
+  }, []);
 
   const beginLayerDrag = (event: ReactPointerEvent<HTMLButtonElement>, layerId: string) => {
     if (event.button !== 0) return;
@@ -1052,6 +1264,7 @@ export default function App() {
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
     setLayerState(prev => ({ ...prev, selectedLayerId: layerId }));
+    setDragPreviewOrder(layerState.layers.map(layer => layer.id));
     setDraggingLayerId(layerId);
   };
 
@@ -1071,8 +1284,8 @@ export default function App() {
       if (dragFrame) return;
       dragFrame = requestAnimationFrame(() => {
         dragFrame = 0;
-        const insertionIndex = getLayerInsertionIndex(latestClientY, draggingLayerId, layerState.layers);
-        moveLayerToIndex(draggingLayerId, insertionIndex);
+        const insertionIndex = getLayerInsertionIndex(latestClientY, draggingLayerId, displayedLayers);
+        previewLayerMoveToIndex(draggingLayerId, insertionIndex, layerState.layers);
       });
     };
 
@@ -1081,11 +1294,16 @@ export default function App() {
         cancelAnimationFrame(dragFrame);
         dragFrame = 0;
       }
-      setDraggingLayerId(null);
+      finishLayerDrag(draggingLayerId, true);
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') finishDrag();
+      if (event.key !== 'Escape') return;
+      if (dragFrame) {
+        cancelAnimationFrame(dragFrame);
+        dragFrame = 0;
+      }
+      finishLayerDrag(draggingLayerId, false);
     };
 
     window.addEventListener('pointermove', handlePointerMove, { passive: false });
@@ -1102,7 +1320,7 @@ export default function App() {
       window.removeEventListener('pointercancel', finishDrag);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [draggingLayerId, layerState.layers]);
+  }, [displayedLayers, draggingLayerId, finishLayerDrag, layerState.layers]);
 
   const exportCurrentImage = () => {
     const output = document.createElement('canvas');
@@ -1116,11 +1334,16 @@ export default function App() {
     link.click();
   };
 
-  const syncSmudgeBrushPreview = (point: SmudgeDistortionPoint | null) => {
+  const syncFilterBrushPreview = (point: SmudgeDistortionPoint | null) => {
     const preview = smudgeBrushPreviewRef.current;
     const inner = smudgeBrushPreviewInnerRef.current;
-    if (!preview || !inner || !filterSettings?.brushEnabled || !point) {
+    if (!preview || !inner || !filterSettings || !point) {
       if (preview) preview.style.opacity = '0';
+      return;
+    }
+    const isBrushEnabled = filterSettings.brushEnabled;
+    if (!isBrushEnabled) {
+      preview.style.opacity = '0';
       return;
     }
     const size = Math.max(4, filterSettings.brushSize);
@@ -1135,7 +1358,24 @@ export default function App() {
     preview.style.height = `${outerSize}px`;
     inner.style.width = `${innerSize}px`;
     inner.style.height = `${innerSize}px`;
-    inner.style.opacity = feather > 0 ? '0.65' : '0';
+    if (filterSettings.type === 'paintMask') {
+      const opacity = Math.max(0, Math.min(1, filterSettings.brushOpacity));
+      preview.style.borderColor = filterSettings.brush === 'white' ? 'rgba(17,24,39,0.8)' : 'rgba(255,255,255,0.95)';
+      preview.style.background = filterSettings.brush === 'white'
+        ? `rgba(255,255,255,${Math.max(0.04, opacity * 0.14)})`
+        : `rgba(0,0,0,${Math.max(0.04, opacity * 0.14)})`;
+      preview.style.boxShadow = filterSettings.brush === 'white'
+        ? '0 0 0 1px rgba(255,255,255,0.6)'
+        : '0 0 0 1px rgba(0,0,0,0.35)';
+      inner.style.opacity = feather > 0 ? `${Math.max(0.15, opacity * 0.85)}` : '0';
+      inner.style.borderColor = filterSettings.brush === 'white' ? 'rgba(17,24,39,0.45)' : 'rgba(255,255,255,0.55)';
+    } else {
+      preview.style.borderColor = 'rgba(255,255,255,0.95)';
+      preview.style.background = 'transparent';
+      preview.style.boxShadow = 'none';
+      inner.style.opacity = feather > 0 ? '0.65' : '0';
+      inner.style.borderColor = 'rgba(255,255,255,0.55)';
+    }
   };
 
   const eventToCanvasPoint = (event: ReactPointerEvent<HTMLDivElement> | PointerEvent): SmudgeDistortionPoint => {
@@ -1159,18 +1399,45 @@ export default function App() {
     processingCommitTimeoutRef.current = window.setTimeout(() => {
       pendingProcessingCommitRef.current = false;
       processingCommitTimeoutRef.current = 0;
-      setLayerState(prev => updateSelectedFilter(prev, layer => ({
-        ...layer,
-        filter: sanitizeSmudgeDistortionFilter({
-          ...layer.filter,
-          strokes: [...layer.filter.strokes, stroke].slice(-80),
-        }),
-      })));
+      setLayerState(prev => updateSelectedFilter(prev, layer => {
+        if (layer.filter.type !== 'smudgeDistortion') return layer;
+        return {
+          ...layer,
+          filter: sanitizeSmudgeDistortionFilter({
+            ...layer.filter,
+            strokes: [...layer.filter.strokes, stroke].slice(-80),
+          }),
+        };
+      }));
+    }, 30);
+  };
+
+  const commitPaintMaskStroke = () => {
+    const stroke = paintMaskStrokeRef.current;
+    paintMaskPaintingRef.current = false;
+    paintMaskStrokeRef.current = null;
+    lastPaintMaskPointRef.current = null;
+    if (!stroke || stroke.points.length < 1) return;
+    pendingProcessingCommitRef.current = true;
+    setProcessingTask('绘制蒙版');
+    processingCommitTimeoutRef.current = window.setTimeout(() => {
+      pendingProcessingCommitRef.current = false;
+      processingCommitTimeoutRef.current = 0;
+      setLayerState(prev => updateSelectedFilter(prev, layer => {
+        if (layer.filter.type !== 'paintMask') return layer;
+        return {
+          ...layer,
+          filter: sanitizePaintMaskFilter({
+            ...layer.filter,
+            strokes: [...layer.filter.strokes, stroke].slice(-80),
+          }),
+        };
+      }));
     }, 30);
   };
 
   const beginSmudgeStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!filterSettings?.brushEnabled || event.button !== 0) return;
+    if (!filterSettings || filterSettings.type !== 'smudgeDistortion' || !filterSettings.brushEnabled || event.button !== 0) return;
     event.preventDefault();
     const point = eventToCanvasPoint(event);
     const stroke: SmudgeDistortionStroke = {
@@ -1182,13 +1449,31 @@ export default function App() {
     smudgePaintingRef.current = true;
     smudgeStrokeRef.current = stroke;
     lastSmudgePointRef.current = point;
-    syncSmudgeBrushPreview(point);
+    syncFilterBrushPreview(point);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const beginPaintMaskStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!filterSettings || filterSettings.type !== 'paintMask' || !filterSettings.brushEnabled || event.button !== 0) return;
+    event.preventDefault();
+    const point = eventToCanvasPoint(event);
+    const stroke: PaintMaskStroke = {
+      points: [point],
+      brush: filterSettings.brush,
+      brushSize: filterSettings.brushSize,
+      brushOpacity: filterSettings.brushOpacity,
+      brushFeather: filterSettings.brushFeather,
+    };
+    paintMaskPaintingRef.current = true;
+    paintMaskStrokeRef.current = stroke;
+    lastPaintMaskPointRef.current = point;
+    syncFilterBrushPreview(point);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const moveSmudgeStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
     const point = eventToCanvasPoint(event);
-    syncSmudgeBrushPreview(point);
+    syncFilterBrushPreview(point);
     if (!smudgePaintingRef.current || !smudgeStrokeRef.current) return;
     event.preventDefault();
     const last = lastSmudgePointRef.current;
@@ -1197,13 +1482,33 @@ export default function App() {
     lastSmudgePointRef.current = point;
   };
 
+  const movePaintMaskStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const point = eventToCanvasPoint(event);
+    syncFilterBrushPreview(point);
+    if (!paintMaskPaintingRef.current || !paintMaskStrokeRef.current) return;
+    event.preventDefault();
+    const last = lastPaintMaskPointRef.current;
+    if (last && pointDistance(last, point, canvasWidth, canvasHeight) < 2) return;
+    paintMaskStrokeRef.current.points = [...paintMaskStrokeRef.current.points, point].slice(-400);
+    lastPaintMaskPointRef.current = point;
+  };
+
   const undoSmudgeStroke = () => {
-    if (!filterSettings) return;
-    updateSelectedFilterSettings({ strokes: filterSettings.strokes.slice(0, -1) });
+    if (!filterSettings || filterSettings.type !== 'smudgeDistortion') return;
+    updateSelectedSmudgeFilterSettings({ strokes: filterSettings.strokes.slice(0, -1) });
   };
 
   const resetSmudgeStrokes = () => {
-    updateSelectedFilterSettings({ strokes: [] });
+    updateSelectedSmudgeFilterSettings({ strokes: [] });
+  };
+
+  const undoPaintMaskStroke = () => {
+    if (!filterSettings || filterSettings.type !== 'paintMask') return;
+    updateSelectedPaintMaskSettings({ strokes: filterSettings.strokes.slice(0, -1) });
+  };
+
+  const resetPaintMaskStrokes = () => {
+    updateSelectedPaintMaskSettings({ strokes: [] });
   };
 
   return (
@@ -1249,17 +1554,25 @@ export default function App() {
             {isFilterLayerSelected && filterSettings?.brushEnabled ? (
               <div
                 className="smudge-input-layer"
-                onPointerDown={beginSmudgeStroke}
-                onPointerMove={moveSmudgeStroke}
+                onPointerDown={event => {
+                  if (filterSettings.type === 'paintMask') beginPaintMaskStroke(event);
+                  else beginSmudgeStroke(event);
+                }}
+                onPointerMove={event => {
+                  if (filterSettings.type === 'paintMask') movePaintMaskStroke(event);
+                  else moveSmudgeStroke(event);
+                }}
                 onPointerUp={event => {
-                  commitSmudgeStroke();
+                  if (filterSettings.type === 'paintMask') commitPaintMaskStroke();
+                  else commitSmudgeStroke();
                   event.currentTarget.releasePointerCapture(event.pointerId);
                 }}
                 onPointerCancel={event => {
-                  commitSmudgeStroke();
+                  if (filterSettings.type === 'paintMask') commitPaintMaskStroke();
+                  else commitSmudgeStroke();
                   event.currentTarget.releasePointerCapture(event.pointerId);
                 }}
-                onPointerLeave={() => syncSmudgeBrushPreview(null)}
+                onPointerLeave={() => syncFilterBrushPreview(null)}
               />
             ) : null}
             <div className="smudge-brush-preview" ref={smudgeBrushPreviewRef}>
@@ -1308,7 +1621,7 @@ export default function App() {
             <button type="button" className="add-layer-button" onClick={addFilterLayer}>新建滤镜 +</button>
           </div>
           <div className="texture-layer-list">
-            {layerState.layers.map(layer => (
+            {displayedLayers.map(layer => (
               <div
                 className={`texture-layer-row ${layer.kind === 'filter' ? 'filter-layer-row' : ''} ${layer.visible === false ? 'hidden-layer' : ''} ${layer.id === layerState.selectedLayerId ? 'active' : ''} ${layer.id === draggingLayerId ? 'dragging' : ''}`}
                 key={layer.id}
@@ -1379,7 +1692,7 @@ export default function App() {
           </div>
         </PanelGroup>
 
-        <PanelGroup title="图层类型">
+        <PanelGroup title={selectedLayer?.name?.trim() || '图层类型'}>
           {isTextureLayerSelected ? <label className="input-row selected-layer-type-row">
             <span>纹理类型</span>
             <select
@@ -1395,8 +1708,9 @@ export default function App() {
           </label> : null}
           {isFilterLayerSelected && filterSettings ? <label className="input-row selected-layer-type-row">
             <span>滤镜类型</span>
-            <select value="smudgeDistortion" onChange={() => undefined}>
+            <select value={filterSettings.type} onChange={event => changeSelectedFilterType(event.currentTarget.value as TextureFilter['type'])}>
               <option value="smudgeDistortion">涂抹畸变</option>
+              <option value="paintMask">绘制蒙版</option>
             </select>
           </label> : null}
         </PanelGroup>
@@ -1439,17 +1753,6 @@ export default function App() {
           {range('spotScale', '整体缩放', 0.1, 10, 0.1, value => value.toFixed(1))}
           {range('spotOffsetX', 'X轴偏移', -400, 400, 1, value => `${Math.round(value)} px`)}
           {range('spotOffsetY', 'Y轴偏移', -400, 400, 1, value => `${Math.round(value)} px`)}
-          <label className="check-row"><span>绘制蒙版</span><input type="checkbox" checked={settings.spotMaskEnabled} onChange={event => updateSettings({ spotMaskEnabled: event.currentTarget.checked })} /></label>
-          {settings.spotMaskEnabled ? <>
-            <label className="input-row"><span>蒙版画笔</span><select value={settings.spotMaskBrush} onChange={event => updateSettings({ spotMaskBrush: event.currentTarget.value as TextureMaskBrush })}><option value="black">黑色：擦除斑纹</option><option value="white">白色：恢复显示</option></select></label>
-            {range('spotMaskBrushSize', '画笔大小', 4, 200, 1, value => `${Math.round(value)} px`)}
-            {range('spotMaskBrushOpacity', '透明度', 0, 1, 0.01, value => value.toFixed(2))}
-            {range('spotMaskFeather', '羽化大小', 0, 1000, 1, value => `${Math.round(value)} px`)}
-            <div className="button-row">
-              <button type="button" className="wide-button" onClick={() => layerCanvasRefs.current[layerState.selectedLayerId]?.undoMask()}>撤销</button>
-              <button type="button" className="wide-button" onClick={() => layerCanvasRefs.current[layerState.selectedLayerId]?.resetMask()}>重置蒙版</button>
-            </div>
-          </> : null}
           {range('contrast', '对比度', 0.2, 3, 0.01, value => value.toFixed(2))}
           {range('threshold', '显隐阈值', 0, 1, 0.01, value => value.toFixed(2))}
         </PanelGroup> : null}
@@ -1523,21 +1826,39 @@ export default function App() {
         </> : null}
 
         {isFilterLayerSelected && filterSettings ? <>
-          <PanelGroup title="绘制">
-            <label className="check-row"><span>启用画笔</span><input type="checkbox" checked={filterSettings.brushEnabled} onChange={event => updateSelectedFilterSettings({ brushEnabled: event.currentTarget.checked })} /></label>
-            {filterRange('brushSize', '画笔大小', 4, 400, 1, value => `${Math.round(value)} px`)}
-            {filterRange('brushStrength', '画笔强度', 0, 1, 0.01, value => value.toFixed(2))}
-            {filterRange('brushFeather', '画笔柔和度', 0, 400, 1, value => `${Math.round(value)} px`)}
-            <div className="button-row">
-              <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={undoSmudgeStroke}>撤销</button>
-              <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={resetSmudgeStrokes}>重置</button>
-            </div>
-          </PanelGroup>
-          <PanelGroup title="滤镜参数">
-            <label className="check-row"><span>启用滤镜</span><input type="checkbox" checked={filterSettings.enabled} onChange={event => updateSelectedFilterSettings({ enabled: event.currentTarget.checked })} /></label>
-            {filterRange('strength', '滤镜强度', 0, 1, 0.01, value => value.toFixed(2))}
-            {filterRange('precision', '精度', 1, 4, 1, value => `${Math.round(value)}x`)}
-          </PanelGroup>
+          {filterSettings.type === 'smudgeDistortion' ? <>
+            <PanelGroup title="绘制">
+              <label className="check-row"><span>启用画笔</span><input type="checkbox" checked={filterSettings.brushEnabled} onChange={event => updateSelectedSmudgeFilterSettings({ brushEnabled: event.currentTarget.checked })} /></label>
+              {filterRange('brushSize', '画笔大小', 4, 400, 1, value => `${Math.round(value)} px`)}
+              {filterRange('brushStrength', '画笔强度', 0, 1, 0.01, value => value.toFixed(2))}
+              {filterRange('brushFeather', '画笔柔和度', 0, 400, 1, value => `${Math.round(value)} px`)}
+              <div className="button-row">
+                <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={undoSmudgeStroke}>撤销</button>
+                <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={resetSmudgeStrokes}>重置</button>
+              </div>
+            </PanelGroup>
+            <PanelGroup title="滤镜参数">
+              <label className="check-row"><span>启用滤镜</span><input type="checkbox" checked={filterSettings.enabled} onChange={event => updateSelectedSmudgeFilterSettings({ enabled: event.currentTarget.checked })} /></label>
+              {filterRange('strength', '滤镜强度', 0, 1, 0.01, value => value.toFixed(2))}
+              {filterRange('precision', '精度', 1, 4, 1, value => `${Math.round(value)}x`)}
+            </PanelGroup>
+          </> : null}
+          {filterSettings.type === 'paintMask' ? <>
+            <PanelGroup title="绘制">
+              <label className="check-row"><span>启用画笔</span><input type="checkbox" checked={filterSettings.brushEnabled} onChange={event => updateSelectedPaintMaskSettings({ brushEnabled: event.currentTarget.checked })} /></label>
+              <label className="input-row"><span>蒙版画笔</span><select value={filterSettings.brush} onChange={event => updateSelectedPaintMaskSettings({ brush: event.currentTarget.value as TextureMaskBrush })}><option value="black">黑色：隐藏内容</option><option value="white">白色：恢复显示</option></select></label>
+              {paintMaskRange('brushSize', '画笔大小', 4, 400, 1, value => `${Math.round(value)} px`)}
+              {paintMaskRange('brushOpacity', '透明度', 0, 1, 0.01, value => value.toFixed(2))}
+              {paintMaskRange('brushFeather', '羽化大小', 0, 400, 1, value => `${Math.round(value)} px`)}
+              <div className="button-row">
+                <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={undoPaintMaskStroke}>撤销</button>
+                <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={resetPaintMaskStrokes}>重置蒙版</button>
+              </div>
+            </PanelGroup>
+            <PanelGroup title="滤镜参数">
+              <label className="check-row"><span>启用滤镜</span><input type="checkbox" checked={filterSettings.enabled} onChange={event => updateSelectedPaintMaskSettings({ enabled: event.currentTarget.checked })} /></label>
+            </PanelGroup>
+          </> : null}
         </> : null}
       </aside>
     </main>
