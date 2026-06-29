@@ -1,5 +1,5 @@
 {
-  "selectedId": "texture-1782447966534",
+  "selectedId": "texture-1782382273361",
   "presets": [
     {
       "id": "texture-1782381734937",
@@ -102,6 +102,7 @@
             "id": "layer-1782380118725-thnbib",
             "kind": "texture",
             "name": "图层2",
+            "visible": true,
             "settings": {
               "textureType": "halftone",
               "enabled": true,
@@ -200,6 +201,7 @@
             "id": "layer-1",
             "kind": "texture",
             "name": "图层1",
+            "visible": true,
             "settings": {
               "textureType": "gradient",
               "enabled": true,
@@ -322,7 +324,7 @@
         "directionDeg": 18,
         "coherence": 1,
         "spotCount": 18,
-        "spotSize": 43,
+        "spotSize": 64,
         "spotBlur": 44,
         "spotType": "gaussian",
         "spotScale": 1,
@@ -337,7 +339,7 @@
         "dotEnabled": true,
         "dotColor": "#ffffff",
         "dotOpacity": 1,
-        "dotSpacing": 24.5,
+        "dotSpacing": 24,
         "dotTileType": "square",
         "dotMinSize": 0.05,
         "dotMaxSize": 4.2,
@@ -411,6 +413,7 @@
             "id": "filter-1782441889911-oatnup",
             "kind": "filter",
             "name": "涂抹畸变1",
+            "visible": true,
             "filter": {
               "type": "smudgeDistortion",
               "enabled": true,
@@ -809,6 +812,7 @@
             "id": "layer-1782442027624-ifqcjf",
             "kind": "texture",
             "name": "图层2",
+            "visible": true,
             "settings": {
               "textureType": "halftone",
               "enabled": true,
@@ -818,7 +822,7 @@
               "directionDeg": 18,
               "coherence": 1,
               "spotCount": 18,
-              "spotSize": 43,
+              "spotSize": 64,
               "spotBlur": 44,
               "spotType": "gaussian",
               "spotScale": 1,
@@ -833,7 +837,7 @@
               "dotEnabled": true,
               "dotColor": "#ffffff",
               "dotOpacity": 1,
-              "dotSpacing": 24.5,
+              "dotSpacing": 24,
               "dotTileType": "square",
               "dotMinSize": 0.05,
               "dotMaxSize": 4.2,
@@ -907,6 +911,7 @@
             "id": "layer-1",
             "kind": "texture",
             "name": "图层1",
+            "visible": true,
             "settings": {
               "textureType": "gradient",
               "enabled": true,
@@ -1015,7 +1020,7 @@
         "selectedLayerId": "layer-1782442027624-ifqcjf"
       },
       "createdAt": "2026-06-25T10:11:06.535Z",
-      "updatedAt": "2026-06-26T02:54:52.360Z"
+      "updatedAt": "2026-06-29T08:35:06.075Z"
     },
     {
       "id": "texture-1782447966534",
@@ -1128,6 +1133,7 @@
             "id": "layer-1",
             "kind": "texture",
             "name": "图层1",
+            "visible": true,
             "settings": {
               "textureType": "gradient",
               "enabled": true,

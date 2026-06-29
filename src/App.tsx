@@ -775,6 +775,7 @@ export default function App() {
   const [canvasHeight, setCanvasHeight] = useState(1080);
   const [canvasWidthInput, setCanvasWidthInput] = useState('1920');
   const [canvasHeightInput, setCanvasHeightInput] = useState('1080');
+  const [previewColor, setPreviewColor] = useState('#F5F5F6');
   const layerCanvasRefs = useRef<Record<string, DynamicTextureCanvasHandle | null>>({});
   const compositeCanvasRef = useRef<HTMLCanvasElement>(null);
   const smudgeBrushPreviewRef = useRef<HTMLDivElement>(null);
@@ -1520,7 +1521,7 @@ export default function App() {
 
       <section className="stage">
         <div className="stage-viewport" ref={stageViewportRef}>
-          <div className="canvas-card" style={{ width: previewWidth, height: previewHeight }}>
+          <div className="canvas-card" style={{ width: previewWidth, height: previewHeight, background: previewColor }}>
             {layerState.layers.filter((layer): layer is TextureLayer => layer.kind === 'texture').map((layer, index) => (
               <div
                 className="texture-layer-canvas texture-source-layer"
@@ -1589,6 +1590,7 @@ export default function App() {
         <PanelGroup title="画布">
           <label className="input-row"><span>宽度</span><input type="text" inputMode="numeric" value={canvasWidthInput} style={{ width: 128 }} onChange={event => setCanvasWidthInput(event.currentTarget.value)} onBlur={() => commitCanvasDimension(canvasWidthInput, canvasWidth, setCanvasWidth, setCanvasWidthInput)} /></label>
           <label className="input-row"><span>高度</span><input type="text" inputMode="numeric" value={canvasHeightInput} style={{ width: 128 }} onChange={event => setCanvasHeightInput(event.currentTarget.value)} onBlur={() => commitCanvasDimension(canvasHeightInput, canvasHeight, setCanvasHeight, setCanvasHeightInput)} /></label>
+          <div className="input-row"><span>预览颜色</span><ColorInput value={previewColor} onChange={setPreviewColor} ariaLabel="编辑画布预览颜色" /></div>
           <button type="button" className="wide-button" onClick={exportCurrentImage}>导出图片</button>
         </PanelGroup>
 
