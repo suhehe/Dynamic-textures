@@ -250,6 +250,12 @@ button:disabled {
   color: #3b3c40;
   cursor: pointer;
   font-weight: 700;
+  transition: background 0.15s ease;
+}
+
+.group-title:hover {
+  background: #f0f0f1;
+  border-radius: 6px;
 }
 
 .chevron {
@@ -292,6 +298,7 @@ button:disabled {
 input[type="range"] {
   width: 100%;
   accent-color: #1683f7;
+  cursor: pointer;
 }
 
 .input-row,
@@ -321,6 +328,25 @@ input[type="range"] {
   color: #34363a;
   padding: 0 10px;
   outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.input-row > input:not([type="color"]):hover {
+  border-color: #c8cad0;
+}
+
+.input-row > select,
+.tool-panel > select,
+.panel-group select,
+.blend-mode-select {
+  cursor: pointer;
+}
+
+.input-row > select:hover,
+.tool-panel > select:hover,
+.panel-group select:hover,
+.blend-mode-select:hover {
+  border-color: #c8cad0;
 }
 
 .texture-type-select select {
@@ -343,6 +369,7 @@ input[type="range"] {
   padding: 0;
   font-weight: 400;
   font-size: 14px;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 .add-layer-button:hover {
   /* color: #1683f7; */
@@ -365,7 +392,7 @@ input[type="range"] {
   min-height: 40px;
   padding: 8px;
   border-radius: 8px;
-  cursor: default;
+  cursor: pointer;
   font-size: 14px;
   user-select: none;
   transition: background 0.16s ease, box-shadow 0.18s ease, opacity 0.18s ease;
@@ -415,11 +442,10 @@ input[type="range"] {
   background: #fff;
 }
 
-.texture-layer-row input,
 .blend-mode-select,
 .layer-visibility-button,
 .layer-delete-button {
-  cursor: default;
+  cursor: pointer;
 }
 
 .layer-drag-handle,
@@ -485,6 +511,7 @@ input[type="range"] {
   color: #34363a;
   padding: 0 10px;
   outline: none;
+  transition: border-color 0.15s ease;
 }
 
 .selected-layer-type-row {
@@ -521,6 +548,11 @@ input[type="range"] {
   border-radius: 8px;
   background: #fff;
   padding: 4px;
+  transition: border-color 0.15s ease;
+}
+
+.color-swatch-button:hover {
+  border-color: #c8cad0;
 }
 
 .color-swatch-button::before {
@@ -570,6 +602,12 @@ input[type="range"] {
   place-items: center;
   padding: 0;
   color: #171717;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.color-picker-icon-button:hover:not(:disabled) {
+  background: #f4f4f6;
+  border-color: #c8cad0;
 }
 
 .color-picker-icon-button:disabled {
@@ -592,6 +630,11 @@ input[type="range"] {
   color: #2f3033;
   text-transform: uppercase;
   font-variant-numeric: tabular-nums;
+  transition: border-color 0.15s ease;
+}
+
+.color-picker-hex input:hover {
+  border-color: #c8cad0;
 }
 
 .color-picker-sat {
@@ -685,6 +728,19 @@ input[type="range"] {
   text-align: center;
   color: #34363a;
   font-variant-numeric: tabular-nums;
+  transition: border-color 0.15s ease;
+}
+
+.color-picker-rgb input:hover {
+  border-color: #c8cad0;
+}
+
+.check-row {
+  cursor: pointer;
+}
+
+.check-row input[type="checkbox"] {
+  cursor: pointer;
 }
 
 .check-row input {
@@ -699,6 +755,18 @@ input[type="range"] {
   border-radius: 8px;
   background: #fff;
   color: #3c3d40;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.wide-button:hover:not(:disabled) {
+  background: #f4f4f6;
+  border-color: #c8cad0;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #fff5f5;
+  border-color: #ffccc7;
+  color: #ff3b30;
 }
 
 .wide-button:disabled,
@@ -724,6 +792,11 @@ input[type="range"] {
   border-radius: 8px;
   background: #111111;
   color: #fff;
+  transition: background 0.15s ease;
+}
+
+.preset-actions .save-button:hover:not(:disabled) {
+  background: #2a2a2a;
 }
 
 .preset-actions .save-button:disabled {
@@ -764,6 +837,13 @@ input[type="range"] {
   transform: translate(-50%, -60%);
   z-index: 1;
   touch-action: none;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.gradient-stop-handle:hover {
+  box-shadow: 0 6px 16px rgba(17, 17, 17, 0.22), inset 0 0 0 1px rgba(0, 0, 0, 0.2);
+  transform: translate(-50%, -60%) scale(1.1);
 }
 
 .gradient-stop-handle::after {
@@ -840,6 +920,11 @@ input[type="range"] {
   color: #34363a;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  transition: border-color 0.15s ease;
+}
+
+.stop-position-input input:hover {
+  border-color: #c8cad0;
 }
 
 .stop-position-input span {
@@ -854,6 +939,11 @@ input[type="range"] {
   background: #f4f4f6;
   color: #ff3b30;
   font-size: 11px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.stop-row button:hover:not(:disabled) {
+  background: #ffe8e5;
 }
 
 @media (max-width: 920px) {

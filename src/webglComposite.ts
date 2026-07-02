@@ -48,6 +48,7 @@ type Renderer = {
   targets: [FramebufferTarget, FramebufferTarget];
   width: number;
   height: number;
+  verified: boolean;
   displacementCache: Map<string, DisplacementCache>;
 };
 
@@ -242,6 +243,7 @@ function getRenderer(canvas: HTMLCanvasElement) {
     targets: [targetA, targetB],
     width: 1,
     height: 1,
+    verified: false,
     displacementCache: new Map(),
   };
   rendererCache.set(canvas, renderer);
@@ -250,6 +252,7 @@ function getRenderer(canvas: HTMLCanvasElement) {
 
 function ensureTargetSize(renderer: Renderer, width: number, height: number) {
   if (renderer.width === width && renderer.height === height) return true;
+  renderer.verified = false;
   renderer.canvas.width = width;
   renderer.canvas.height = height;
   const { gl } = renderer;
@@ -560,8 +563,14 @@ export function drawLayerStackWebGL(
     gl.viewport(0, 0, width, height);
     gl.clear(gl.COLOR_BUFFER_BIT);
     drawCopy(renderer, targets[currentTarget].texture, null, width, height);
-    gl.finish();
-    if (!hasVisiblePixels(gl, width, height)) return false;
+    // The finish + readback probe only guards against drivers that silently
+    // render nothing. It forces a synchronous GPU stall, so run it once per
+    // renderer/size instead of every animation frame.
+    if (!renderer.verified) {
+      gl.finish();
+      if (!hasVisiblePixels(gl, width, height)) return false;
+      renderer.verified = true;
+    }
 
     const outputCtx = output.getContext('2d');
     if (!outputCtx) return false;

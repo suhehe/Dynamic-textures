@@ -467,20 +467,41 @@ function drawLayerStack(
   outputCtx.globalAlpha = 1;
 }
 
-function applySmudgeDistortion(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  filter: SmudgeDistortionFilter,
-) {
-  const source = ctx.getImageData(0, 0, width, height);
-  const output = ctx.createImageData(width, height);
-  const src = source.data;
-  const dst = output.data;
-  const maxDim = Math.max(width, height);
-  const precision = Math.max(1, Math.min(4, Math.round(filter.precision)));
+function smudgeFieldKey(filter: SmudgeDistortionFilter, width: number, height: number) {
+  return `${width}x${height}:${filter.strength}:${filter.precision}:${filter.strokes.map(stroke => (
+    `${stroke.brushSize},${stroke.brushStrength},${stroke.brushFeather}:` +
+    stroke.points.map(point => `${point.x.toFixed(4)},${point.y.toFixed(4)}`).join(';')
+  )).join('|')}`;
+}
+
+type SmudgeFieldCache = {
+  key: string;
+  fieldWidth: number;
+  fieldHeight: number;
+  dxField: Float32Array;
+  dyField: Float32Array;
+};
+
+// The displacement field only depends on the strokes/params, not on the (per
+// frame changing) source pixels. Cache it so animated textures under a smudge
+// filter don't rebuild the whole field every composite frame.
+let smudgeFieldCache: SmudgeFieldCache | null = null;
+
+function buildSmudgeField(filter: SmudgeDistortionFilter, width: number, height: number, precision: number) {
+  const key = smudgeFieldKey(filter, width, height);
   const fieldWidth = width * precision;
   const fieldHeight = height * precision;
+  const cached = smudgeFieldCache;
+  if (
+    cached &&
+    cached.key === key &&
+    cached.fieldWidth === fieldWidth &&
+    cached.fieldHeight === fieldHeight
+  ) {
+    return cached;
+  }
+
+  const maxDim = Math.max(width, height);
   const dxField = new Float32Array(fieldWidth * fieldHeight);
   const dyField = new Float32Array(fieldWidth * fieldHeight);
 
@@ -529,6 +550,26 @@ function applySmudgeDistortion(
       }
     }
   }
+
+  smudgeFieldCache = { key, fieldWidth, fieldHeight, dxField, dyField };
+  return smudgeFieldCache;
+}
+
+function applySmudgeDistortion(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  filter: SmudgeDistortionFilter,
+) {
+  const source = ctx.getImageData(0, 0, width, height);
+  const output = ctx.createImageData(width, height);
+  const src = source.data;
+  const dst = output.data;
+  const maxDim = Math.max(width, height);
+  const precision = Math.max(1, Math.min(4, Math.round(filter.precision)));
+  const fieldWidth = width * precision;
+  const fieldHeight = height * precision;
+  const { dxField, dyField } = buildSmudgeField(filter, width, height, precision);
 
   const sampleField = (field: Float32Array, x: number, y: number) => {
     const fx = clamp(((x + 0.5) / width) * fieldWidth - 0.5, 0, fieldWidth - 1);

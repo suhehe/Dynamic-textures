@@ -132,8 +132,7 @@ float spotIntensity(vec2 p) {
   }
   return intensity;
 }
-float shapeAlpha(vec2 delta, float radius) {
-  float aa = max(0.75, fwidth(delta.x) + fwidth(delta.y));
+float shapeAlpha(vec2 delta, float radius, float aa) {
   if (u_symbol == 1) {
     vec2 q = abs(delta) - vec2(radius);
     float d = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
@@ -185,7 +184,10 @@ void main() {
   float edgeL = u_fade.z <= 1.0 ? 1.0 : clamp01(drawCenter.x / u_fade.z);
   float edgeR = u_fade.w <= 1.0 ? 1.0 : clamp01((u_size.x - drawCenter.x) / u_fade.w);
   float edge = min(min(edgeT, edgeB), min(edgeL, edgeR));
-  float a = shapeAlpha(p - drawCenter, radius) * u_opacity * shaped * edge * mask;
+  // 抗锯齿宽度基于连续坐标 p 的屏幕导数（约 1 像素），而不是 (p - drawCenter)。
+  // 后者在 cell 边界处会随 drawCenter 突变，导致 fwidth 飙升并在点之间渲染出网格线。
+  float aa = max(0.75, fwidth(p.x) + fwidth(p.y));
+  float a = shapeAlpha(p - drawCenter, radius, aa) * u_opacity * shaped * edge * mask;
   if (a <= 0.001) discard;
   gl_FragColor = vec4(u_color * a, a);
 }`;
