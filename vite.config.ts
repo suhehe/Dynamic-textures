@@ -1,7 +1,8 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+import { cloudflare } from '@cloudflare/vite-plugin';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { dirname, resolve } from 'path';
 
 function readRequestBody(req: any) {
   return new Promise<string>((resolveBody, reject) => {
@@ -47,7 +48,7 @@ function texturePresetData(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), texturePresetData()],
+  plugins: [react(), texturePresetData(), cloudflare()],
   base: './',
   server: {
     port: 3001,
