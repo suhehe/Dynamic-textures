@@ -1,27 +1,68 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent as ReactChangeEvent,
+  type DragEvent as ReactDragEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import { ColorInput } from './components/ColorInput';
 import { DynamicTextureCanvas, type DynamicTextureCanvasHandle } from './components/DynamicTextureCanvas';
 import { drawLayerStackWebGL, type WebGLCompositeLayer } from './webglComposite';
+import { loadDynamicImageFile, releaseDynamicImageAsset, type DynamicImageAsset } from './dynamicImage';
+import { createDynamicImageGL, renderDynamicImageGL, type DynamicImageGLState } from './dynamicImageWebGL';
+import { getOutlinesBlurOffsets } from './outlines';
 import eyeIcon from './assets/eye.svg';
 import eyeClosedIcon from './assets/eye_close.svg';
 import {
+  DYNAMIC_IMAGE_ALGORITHM_VALUES,
+  DYNAMIC_IMAGE_DEFORMATION_ALGORITHMS,
+  DYNAMIC_IMAGE_ALGORITHM_GROUPS,
+  GRADIENT_ALGO_TRANSFORM_PARAM_BOUNDS,
+  GRADIENT_ALGO_TRANSFORM_PARAM_DEFS,
+  GRADIENT_ALGORITHM_GROUPS,
+  OUTLINES_DEFAULT_LINE_GRADIENT,
+  TRANSFORM_PARAM_BOUNDS_DEFAULT,
+  TRANSFORM_PARAM_DEFS,
+  TRANSFORM_PARAMS_DEFAULTS,
   TEXTURE_DEFAULTS,
+  clampTransformParamsToSize,
+  getDynamicImageAlgorithmDef,
+  sanitizeDynamicImageEffect,
+  sanitizeOutlinesEffect,
+  sanitizeTransformParams,
+  isDefaultTransformParams,
+  isDynamicImageDeformationAlgorithm,
+  getGradientAlgorithmDef,
   getTextureDefaults,
-  sanitizePaintMaskFilter,
+  isGradientAlgorithm,
+  sanitizePixelGrainEffect,
+  sanitizePaintMaskEffect,
   readPresetFile,
-  sanitizeSmudgeDistortionFilter,
-  sanitizeTextureFilter,
+  sanitizeSmudgeDistortionEffect,
+  sanitizeTextureEffect,
   sanitizeTextureSettings,
   writePresetFile,
+  type DynamicImageEffect,
   type GradientColorStop,
-  type PaintMaskFilter,
+  type PixelGrainBlendMode,
+  type PixelGrainEffect,
+  type PaintMaskEffect,
+  type OutlinesEffect,
+  type OutlinesInputMode,
   type PaintMaskStroke,
-  type SmudgeDistortionFilter,
+  type SmudgeDistortionEffect,
   type SmudgeDistortionPoint,
   type SmudgeDistortionStroke,
   type TextureActivationType,
   type TextureAnimType,
-  type TextureFilter,
+  type TextureDynamicImageAlgorithm,
+  type TextureEffect,
+  type TransformParamKey,
+  type TransformParams,
+  type TextureGradientAlgorithm,
   type TextureGradientAnimType,
   type TextureMaskBrush,
   type TexturePreset,
@@ -40,9 +81,12 @@ type NumberKey = Extract<keyof TextureSettings,
   'activationOffsetX' | 'activationOffsetY' | 'activationRadiusX' | 'activationRadiusY' | 'activationInitialSpeed' | 'activationFinalSpeed' |
   'activationDuration' | 'activationRippleInterval' | 'activationRingWidth' |
   'gradientAngle' | 'gradientFadeEdgeTop' | 'gradientFadeEdgeBottom' | 'gradientFadeEdgeLeft' | 'gradientFadeEdgeRight' |
-  'gradientAnimSpeed' | 'gradientFlowScaleX' | 'gradientFlowScaleY' | 'gradientFlowRotation' | 'gradientFlowWarp' | 'gradientFlowSoftness' |
-  'gradientFlowComplexity'
+  'gradientAnimSpeed' | 'gradientFlowRotation' | 'gradientFlowWarp' | 'gradientFlowSoftness' |
+  'gradientFlowComplexity' | 'gradientFlowParamA' | 'gradientFlowParamB' |
+  'dynamicImageScale' | 'dynamicImageAspectRatio' | 'dynamicImageOffsetX' | 'dynamicImageOffsetY' |
+  'dynamicImageSpeed' | 'dynamicImageStrength' | 'dynamicImageParamA' | 'dynamicImageParamB' | 'dynamicImageOpacity'
 >;
+type EffectTypeSelectValue = TextureEffect['type'] | `dynamicImageEffect:${TextureDynamicImageAlgorithm}`;
 
 const STORAGE_KEY = 'dynamic-textures.current.v1';
 const CANVAS_STATUS_SPACE = 32;
@@ -81,15 +125,15 @@ interface TextureLayer {
   blendMode: TextureLayerBlendMode;
 }
 
-interface FilterLayer {
-  kind: 'filter';
+interface EffectLayer {
+  kind: 'effect';
   id: string;
   name: string;
   visible: boolean;
-  filter: TextureFilter;
+  effect: TextureEffect;
 }
 
-type Layer = TextureLayer | FilterLayer;
+type Layer = TextureLayer | EffectLayer;
 
 interface TextureLayerState {
   layers: Layer[];
@@ -171,6 +215,12 @@ const BLEND_MODE_GROUPS: Array<{ title: string; options: Array<{ value: TextureL
 ];
 
 const BLEND_MODE_LABELS = new Map(BLEND_MODE_GROUPS.flatMap(group => group.options).map(option => [option.value, option.label]));
+const PIXEL_GRAIN_BLEND_OPTIONS: Array<{ value: PixelGrainBlendMode; label: string }> = [
+  { value: 'overlay', label: '叠加' },
+  { value: 'softLight', label: '柔光' },
+  { value: 'screen', label: '滤色' },
+  { value: 'multiply', label: '正片叠底' },
+];
 const FLOW_DEFAULT_STOPS: GradientColorStop[] = [
   { position: 0, color: '#7B2FF7', opacity: 1 },
   { position: 0.34, color: '#2B86FF', opacity: 1 },
@@ -189,35 +239,98 @@ function createTextureLayer(index: number, settings: TextureSettings = TEXTURE_D
   };
 }
 
-function createSmudgeFilterLayer(index: number): FilterLayer {
+function createEffectLayer(index: number, effect: TextureEffect): EffectLayer {
   return {
-    kind: 'filter',
-    id: `filter-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    name: `滤镜${index}`,
+    kind: 'effect',
+    id: `effect-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: `效果${index}`,
     visible: true,
-    filter: sanitizeSmudgeDistortionFilter({
-      enabled: true,
-      strength: 1,
-      precision: 2,
-      brushEnabled: true,
-      brushSize: 80,
-      brushStrength: 0.45,
-      brushFeather: 48,
-      strokes: [],
-    }),
+    effect,
   };
 }
 
-function createPaintMaskFilter(): PaintMaskFilter {
-  return sanitizePaintMaskFilter({
+function createSmudgeDistortionEffect(): SmudgeDistortionEffect {
+  return sanitizeSmudgeDistortionEffect({
+    enabled: true,
+    transform: TRANSFORM_PARAMS_DEFAULTS,
+    strength: 1,
+    precision: 2,
+    brushEnabled: true,
+    brushSize: 176,
+    brushStrength: 0.64,
+    brushFeather: 80,
+    strokes: [],
+  });
+}
+
+function createPaintMaskEffect(): PaintMaskEffect {
+  return sanitizePaintMaskEffect({
     enabled: true,
     brushEnabled: true,
     brush: 'black',
-    brushSize: 44,
-    brushOpacity: 1,
-    brushFeather: 10,
+    brushSize: 176,
+    brushOpacity: 0.1,
+    brushFeather: 141,
     strokes: [],
   });
+}
+
+function createPixelGrainEffect(): PixelGrainEffect {
+  return sanitizePixelGrainEffect({
+    enabled: true,
+    amount: 0.13,
+    blendMode: 'overlay',
+    seed: 173,
+  });
+}
+
+function createDynamicImageEffect(algorithm: TextureDynamicImageAlgorithm = 'flowDistort'): DynamicImageEffect {
+  const defaults = getDynamicImageAlgorithmDef(algorithm);
+  return sanitizeDynamicImageEffect({
+    enabled: true,
+    transform: TRANSFORM_PARAMS_DEFAULTS,
+    algorithm: defaults.id,
+    speed: defaults.defaults.dynamicImageSpeed ?? 0.8,
+    strength: defaults.defaults.dynamicImageStrength ?? 0.44,
+    paramA: defaults.defaults.dynamicImageParamA ?? 0.5,
+    paramB: defaults.defaults.dynamicImageParamB ?? 0.35,
+    opacity: defaults.defaults.dynamicImageOpacity ?? 1,
+  });
+}
+
+function createOutlinesEffect(): OutlinesEffect {
+  return sanitizeOutlinesEffect({ enabled: true });
+}
+
+const DYNAMIC_IMAGE_EFFECT_TYPE_PREFIX = 'dynamicImageEffect:' as const;
+
+function isDynamicImageAlgorithmValue(value: string): value is TextureDynamicImageAlgorithm {
+  return DYNAMIC_IMAGE_ALGORITHM_VALUES.includes(value as TextureDynamicImageAlgorithm);
+}
+
+function parseEffectTypeSelectValue(value: string): { type: TextureEffect['type']; algorithm?: TextureDynamicImageAlgorithm } {
+  if (value.startsWith(DYNAMIC_IMAGE_EFFECT_TYPE_PREFIX)) {
+    const algorithm = value.slice(DYNAMIC_IMAGE_EFFECT_TYPE_PREFIX.length);
+    return {
+      type: 'dynamicImageEffect',
+      algorithm: isDynamicImageAlgorithmValue(algorithm) ? algorithm : undefined,
+    };
+  }
+  if (value === 'paintMask' || value === 'pixelGrain' || value === 'dynamicImageEffect' || value === 'outlines') {
+    return { type: value };
+  }
+  return { type: 'smudgeDistortion' };
+}
+
+function toEffectTypeSelectValue(effect: TextureEffect): EffectTypeSelectValue {
+  if (effect.type !== 'dynamicImageEffect') return effect.type;
+  return `${DYNAMIC_IMAGE_EFFECT_TYPE_PREFIX}${effect.algorithm}`;
+}
+
+function effectSupportsTransform(effect: TextureEffect) {
+  if (effect.type === 'smudgeDistortion') return true;
+  if (effect.type !== 'dynamicImageEffect') return false;
+  return isDynamicImageDeformationAlgorithm(effect.algorithm);
 }
 
 function sanitizeBlendMode(value: unknown): TextureLayerBlendMode {
@@ -231,16 +344,17 @@ function sanitizeTextureLayerState(raw: unknown): TextureLayerState {
     const layers = rawLayers
       .map((item, index) => {
         if (!item || typeof item !== 'object') return null;
-        const layer = item as Partial<Layer> & { settings?: unknown; blendMode?: unknown; filter?: unknown; kind?: unknown; visible?: unknown };
+        const layer = item as Partial<Layer> & { settings?: unknown; blendMode?: unknown; filter?: unknown; effect?: unknown; kind?: unknown; visible?: unknown };
         const id = typeof layer.id === 'string' && layer.id.trim() ? layer.id.trim() : `layer-${index + 1}`;
         const visible = layer.visible !== false;
-        if (layer.kind === 'filter') {
+        const rawKind = (layer as { kind?: unknown }).kind;
+        if (rawKind === 'effect' || rawKind === 'filter') {
           return {
-            kind: 'filter',
+            kind: 'effect',
             id,
-            name: typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `滤镜${index + 1}`,
+            name: typeof layer.name === 'string' && layer.name.trim() ? layer.name.trim() : `效果${index + 1}`,
             visible,
-            filter: sanitizeTextureFilter(layer.filter),
+            effect: sanitizeTextureEffect(layer.effect ?? layer.filter),
           };
         }
         return {
@@ -281,10 +395,10 @@ function updateSelectedLayer(layerState: TextureLayerState, update: (layer: Text
   };
 }
 
-function updateSelectedFilter(layerState: TextureLayerState, update: (layer: FilterLayer) => FilterLayer): TextureLayerState {
+function updateSelectedEffect(layerState: TextureLayerState, update: (layer: EffectLayer) => EffectLayer): TextureLayerState {
   return {
     ...layerState,
-    layers: layerState.layers.map(layer => layer.id === layerState.selectedLayerId && layer.kind === 'filter' ? update(layer) : layer),
+    layers: layerState.layers.map(layer => layer.id === layerState.selectedLayerId && layer.kind === 'effect' ? update(layer) : layer),
   };
 }
 
@@ -334,7 +448,7 @@ function getCompositeLayerSignature(layers: Layer[]) {
         kind: layer.kind,
         id: layer.id,
         visible: layer.visible,
-        filter: layer.filter,
+        effect: layer.effect,
       }
   )));
 }
@@ -370,9 +484,18 @@ function pointDistance(a: SmudgeDistortionPoint, b: SmudgeDistortionPoint, width
 function textureNeedsContinuousComposite(settings: TextureSettings) {
   if (!settings.enabled) return false;
   if (settings.textureType === 'gradient') {
-    return settings.animEnabled !== false && settings.gradientAnimType === 'flow';
+    return settings.animEnabled !== false && isGradientAlgorithm(settings.gradientAnimType);
+  }
+  if (settings.textureType === 'dynamicImage') {
+    return false;
   }
   return settings.animEnabled !== false || settings.activationEnabled;
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function getTextureSourceCanvas(
@@ -388,6 +511,184 @@ function getTextureSourceCanvas(
     .find(canvas => canvas.dataset.textureLayerId === layerId) ?? null;
 }
 
+type DynamicEffectFallbackState = {
+  sourceCanvas: HTMLCanvasElement;
+  sourceCtx: CanvasRenderingContext2D | null;
+  glState: DynamicImageGLState | null | undefined;
+};
+
+const dynamicEffectFallbackStates = new WeakMap<HTMLCanvasElement, DynamicEffectFallbackState>();
+
+function normalizeDynamicImageFilterParams(effect: DynamicImageEffect): { paramA: number; paramB: number } {
+  const toUnit = (value: number, min: number, max: number) => {
+    if (max <= min) return 0;
+    return clamp((value - min) / (max - min), 0, 1);
+  };
+  if (effect.algorithm === 'flowDistort') {
+    return {
+      paramA: toUnit(effect.paramA, 0.05, 2),
+      paramB: toUnit(effect.paramB, 0.05, 2.5),
+    };
+  }
+  if (effect.algorithm === 'ripple') {
+    return {
+      paramA: toUnit(effect.paramA, 0.1, 2.5),
+      paramB: toUnit(effect.paramB, 0.05, 1),
+    };
+  }
+  if (effect.algorithm === 'chromaticAberration') {
+    return {
+      paramA: toUnit(effect.paramA, 0.05, 1),
+      paramB: toUnit(effect.paramB, 0, 1),
+    };
+  }
+  return {
+    paramA: effect.paramA,
+    paramB: clamp(effect.paramB, 0, 1),
+  };
+}
+
+function needsDynamicImageEdgeSafeZoom(algorithm: TextureDynamicImageAlgorithm) {
+  return algorithm === 'flowDistort' || algorithm === 'ripple' || algorithm === 'chromaticAberration';
+}
+
+function drawCenteredSafeZoom(
+  ctx: CanvasRenderingContext2D,
+  source: HTMLCanvasElement,
+  width: number,
+  height: number,
+  zoom: number,
+) {
+  const safeZoom = Math.max(1, Number.isFinite(zoom) ? zoom : 1);
+  if (safeZoom <= 1.0001) {
+    ctx.drawImage(source, 0, 0, width, height);
+    return;
+  }
+  const sampleW = width / safeZoom;
+  const sampleH = height / safeZoom;
+  const sampleX = (width - sampleW) * 0.5;
+  const sampleY = (height - sampleH) * 0.5;
+  ctx.drawImage(source, sampleX, sampleY, sampleW, sampleH, 0, 0, width, height);
+}
+
+function getDynamicEffectFallbackState(output: HTMLCanvasElement): DynamicEffectFallbackState {
+  const cached = dynamicEffectFallbackStates.get(output);
+  if (cached) return cached;
+  const sourceCanvas = document.createElement('canvas');
+  const state: DynamicEffectFallbackState = {
+    sourceCanvas,
+    sourceCtx: sourceCanvas.getContext('2d', { willReadFrequently: true }),
+    glState: undefined,
+  };
+  dynamicEffectFallbackStates.set(output, state);
+  return state;
+}
+
+function getEffectTransform(effect: DynamicImageEffect | SmudgeDistortionEffect, width: number, height: number) {
+  return clampTransformParamsToSize(effect.transform, width, height, TRANSFORM_PARAM_BOUNDS_DEFAULT);
+}
+
+function mapPointByInverseTransform(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  transform: TransformParams,
+) {
+  const nx = x - 0.5 - transform.offsetX / Math.max(1, width);
+  const ny = y - 0.5 - transform.offsetY / Math.max(1, height);
+  return {
+    x: nx / Math.max(0.0001, transform.scale) + 0.5,
+    y: ny / Math.max(0.0001, transform.scale * transform.aspectRatio) + 0.5,
+  };
+}
+
+function isSameTransformParams(a: TransformParams, b: TransformParams) {
+  return Math.abs(a.scale - b.scale) < 0.0001
+    && Math.abs(a.aspectRatio - b.aspectRatio) < 0.0001
+    && Math.abs(a.offsetX - b.offsetX) < 0.0001
+    && Math.abs(a.offsetY - b.offsetY) < 0.0001;
+}
+
+function applyDynamicImageEffectFallback(
+  outputCtx: CanvasRenderingContext2D,
+  output: HTMLCanvasElement,
+  width: number,
+  height: number,
+  effect: DynamicImageEffect,
+  timeSec: number = performance.now() * 0.001,
+) {
+  const state = getDynamicEffectFallbackState(output);
+  if (!state.sourceCtx) {
+    if (import.meta.env.DEV) {
+      console.warn('Dynamic image effect fallback skipped: source 2D context unavailable.');
+    }
+    return false;
+  }
+  if (state.sourceCanvas.width !== width) state.sourceCanvas.width = width;
+  if (state.sourceCanvas.height !== height) state.sourceCanvas.height = height;
+  state.sourceCtx.setTransform(1, 0, 0, 1, 0, 0);
+  state.sourceCtx.clearRect(0, 0, width, height);
+  const effectTransform = getEffectTransform(effect, width, height);
+  const applyDeformationTransform = isDynamicImageDeformationAlgorithm(effect.algorithm);
+  if (applyDeformationTransform) {
+    const centerX = width * 0.5 + effectTransform.offsetX;
+    const centerY = height * 0.5 + effectTransform.offsetY;
+    state.sourceCtx.save();
+    state.sourceCtx.translate(centerX, centerY);
+    state.sourceCtx.scale(effectTransform.scale, effectTransform.scale * effectTransform.aspectRatio);
+    state.sourceCtx.translate(-width * 0.5, -height * 0.5);
+    drawCenteredSafeZoom(
+      state.sourceCtx,
+      output,
+      width,
+      height,
+      needsDynamicImageEdgeSafeZoom(effect.algorithm) ? 1.02 : 1,
+    );
+    state.sourceCtx.restore();
+  } else {
+    drawCenteredSafeZoom(
+      state.sourceCtx,
+      output,
+      width,
+      height,
+      needsDynamicImageEdgeSafeZoom(effect.algorithm) ? 1.02 : 1,
+    );
+  }
+  if (state.glState === undefined) {
+    state.glState = createDynamicImageGL();
+  }
+  if (!state.glState) {
+    if (import.meta.env.DEV) {
+      console.warn('Dynamic image effect fallback skipped: WebGL unavailable.');
+    }
+    return false;
+  }
+  const normalized = normalizeDynamicImageFilterParams(effect);
+  const ok = renderDynamicImageGL(state.glState, {
+    width,
+    height,
+    source: state.sourceCanvas,
+    fit: 'cover',
+    algorithm: effect.algorithm,
+    timeSec,
+    speed: effect.speed,
+    strength: effect.strength,
+    paramA: normalized.paramA,
+    paramB: normalized.paramB,
+    opacity: effect.opacity,
+  });
+  if (!ok) {
+    if (import.meta.env.DEV) {
+      console.warn('Dynamic image effect fallback skipped: single-pass render failed.');
+    }
+    return false;
+  }
+  outputCtx.globalCompositeOperation = 'source-over';
+  outputCtx.drawImage(state.glState.canvas, 0, 0, width, height);
+  return true;
+}
+
 function drawLayerStack(
   output: HTMLCanvasElement,
   layers: Layer[],
@@ -395,6 +696,7 @@ function drawLayerStack(
   width: number,
   height: number,
 ) {
+  const timeSec = performance.now() * 0.001;
   const visibleLayers = layers.filter(layer => layer.visible !== false);
   const textureSourceCanvases = new Map<string, HTMLCanvasElement>();
   for (const layer of visibleLayers) {
@@ -413,27 +715,32 @@ function drawLayerStack(
 
   const webglLayers: WebGLCompositeLayer[] = visibleLayers.map(layer => {
     if (layer.kind === 'texture') {
+      const frameVersion = layerCanvases[layer.id]?.getFrameVersion() ?? 0;
       return {
         kind: 'texture',
         id: layer.id,
         blendMode: layer.blendMode,
         canvas: textureSourceCanvases.get(layer.id) ?? null,
+        frameVersion,
       };
     }
     return {
-      kind: 'filter',
+      kind: 'effect',
       id: layer.id,
-      filter: layer.filter,
+      effect: layer.effect,
     };
   });
-  const hasActiveSmudgeFilter = visibleLayers.some(layer => (
-    layer.kind === 'filter' &&
-    layer.filter.type === 'smudgeDistortion' &&
-    layer.filter.enabled &&
-    layer.filter.strength > 0 &&
-    layer.filter.strokes.length > 0
+  const hasActiveWebglEffect = visibleLayers.some(layer => (
+    layer.kind === 'effect' &&
+    layer.effect.enabled &&
+    (
+      (layer.effect.type === 'smudgeDistortion' && layer.effect.strength > 0 && layer.effect.strokes.length > 0)
+      || (layer.effect.type === 'pixelGrain' && layer.effect.amount > 0)
+      || (layer.effect.type === 'dynamicImageEffect' && layer.effect.opacity > 0 && layer.effect.strength > 0)
+      || (layer.effect.type === 'outlines' && layer.effect.count > 0 && layer.effect.thickness > 0)
+    )
   ));
-  if (hasActiveSmudgeFilter && drawLayerStackWebGL(output, webglLayers, width, height)) return;
+  if (hasActiveWebglEffect && drawLayerStackWebGL(output, webglLayers, width, height, timeSec)) return;
 
   const outputCtx = output.getContext('2d', { willReadFrequently: true });
   if (!outputCtx || width <= 0 || height <= 0) return;
@@ -454,21 +761,37 @@ function drawLayerStack(
       continue;
     }
 
-    if (!hasDrawnLayer || !layer.filter.enabled) continue;
-    if (layer.filter.type === 'smudgeDistortion') {
-      if (layer.filter.strength <= 0 || layer.filter.strokes.length === 0) continue;
-      applySmudgeDistortion(outputCtx, width, height, layer.filter);
+    if (!hasDrawnLayer || !layer.effect.enabled) continue;
+    if (layer.effect.type === 'smudgeDistortion') {
+      if (layer.effect.strength <= 0 || layer.effect.strokes.length === 0) continue;
+      applySmudgeDistortion(outputCtx, width, height, layer.effect);
       continue;
     }
-    if (layer.filter.strokes.length === 0) continue;
-    applyPaintMask(outputCtx, width, height, layer.filter);
+    if (layer.effect.type === 'paintMask') {
+      if (layer.effect.strokes.length === 0) continue;
+      applyPaintMask(outputCtx, width, height, layer.effect);
+      continue;
+    }
+    if (layer.effect.type === 'dynamicImageEffect') {
+      if (layer.effect.strength <= 0 || layer.effect.opacity <= 0) continue;
+      applyDynamicImageEffectFallback(outputCtx, output, width, height, layer.effect, timeSec);
+      continue;
+    }
+    if (layer.effect.type === 'outlines') {
+      if (layer.effect.count <= 0 || layer.effect.thickness <= 0) continue;
+      applyOutlines(outputCtx, width, height, layer.effect, timeSec);
+      continue;
+    }
+    if (layer.effect.amount <= 0) continue;
+    applyPixelGrain(outputCtx, width, height, layer.effect);
   }
   outputCtx.globalCompositeOperation = 'source-over';
   outputCtx.globalAlpha = 1;
 }
 
-function smudgeFieldKey(filter: SmudgeDistortionFilter, width: number, height: number) {
-  return `${width}x${height}:${filter.strength}:${filter.precision}:${filter.strokes.map(stroke => (
+function smudgeFieldKey(effect: SmudgeDistortionEffect, width: number, height: number) {
+  const transform = getEffectTransform(effect, width, height);
+  return `${width}x${height}:${effect.strength}:${effect.precision}:${transform.scale.toFixed(4)}:${transform.aspectRatio.toFixed(4)}:${transform.offsetX.toFixed(2)}:${transform.offsetY.toFixed(2)}:${effect.strokes.map(stroke => (
     `${stroke.brushSize},${stroke.brushStrength},${stroke.brushFeather}:` +
     stroke.points.map(point => `${point.x.toFixed(4)},${point.y.toFixed(4)}`).join(';')
   )).join('|')}`;
@@ -487,8 +810,8 @@ type SmudgeFieldCache = {
 // filter don't rebuild the whole field every composite frame.
 let smudgeFieldCache: SmudgeFieldCache | null = null;
 
-function buildSmudgeField(filter: SmudgeDistortionFilter, width: number, height: number, precision: number) {
-  const key = smudgeFieldKey(filter, width, height);
+function buildSmudgeField(effect: SmudgeDistortionEffect, width: number, height: number, precision: number) {
+  const key = smudgeFieldKey(effect, width, height);
   const fieldWidth = width * precision;
   const fieldHeight = height * precision;
   const cached = smudgeFieldCache;
@@ -502,28 +825,31 @@ function buildSmudgeField(filter: SmudgeDistortionFilter, width: number, height:
   }
 
   const maxDim = Math.max(width, height);
+  const transform = getEffectTransform(effect, width, height);
   const dxField = new Float32Array(fieldWidth * fieldHeight);
   const dyField = new Float32Array(fieldWidth * fieldHeight);
 
-  for (const stroke of filter.strokes) {
+  for (const stroke of effect.strokes) {
     const radius = Math.max(2, stroke.brushSize / 2) * precision;
     const feather = Math.max(0, stroke.brushFeather) * precision;
     const spread = radius + feather;
     const inner = Math.max(0, radius - feather);
-    const force = stroke.brushStrength * filter.strength * 0.34;
+    const force = stroke.brushStrength * effect.strength * 0.34;
     if (force <= 0 || spread <= 0) continue;
 
     for (let i = 1; i < stroke.points.length; i += 1) {
       const prev = stroke.points[i - 1];
       const next = stroke.points[i];
-      const px = prev.x * fieldWidth;
-      const py = prev.y * fieldHeight;
-      const nx = next.x * fieldWidth;
-      const ny = next.y * fieldHeight;
+      const prevMapped = mapPointByInverseTransform(prev.x, prev.y, width, height, transform);
+      const nextMapped = mapPointByInverseTransform(next.x, next.y, width, height, transform);
+      const px = prevMapped.x * fieldWidth;
+      const py = prevMapped.y * fieldHeight;
+      const nx = nextMapped.x * fieldWidth;
+      const ny = nextMapped.y * fieldHeight;
       const moveX = nx - px;
       const moveY = ny - py;
-      const sourceMoveX = (next.x - prev.x) * width;
-      const sourceMoveY = (next.y - prev.y) * height;
+      const sourceMoveX = (nextMapped.x - prevMapped.x) * width;
+      const sourceMoveY = (nextMapped.y - prevMapped.y) * height;
       const distance = Math.hypot(moveX, moveY);
       if (distance < 0.25 * precision) continue;
       const step = Math.max(2, spread * 0.28);
@@ -559,17 +885,17 @@ function applySmudgeDistortion(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  filter: SmudgeDistortionFilter,
+  effect: SmudgeDistortionEffect,
 ) {
   const source = ctx.getImageData(0, 0, width, height);
   const output = ctx.createImageData(width, height);
   const src = source.data;
   const dst = output.data;
   const maxDim = Math.max(width, height);
-  const precision = Math.max(1, Math.min(4, Math.round(filter.precision)));
+  const precision = Math.max(1, Math.min(4, Math.round(effect.precision)));
   const fieldWidth = width * precision;
   const fieldHeight = height * precision;
-  const { dxField, dyField } = buildSmudgeField(filter, width, height, precision);
+  const { dxField, dyField } = buildSmudgeField(effect, width, height, precision);
 
   const sampleField = (field: Float32Array, x: number, y: number) => {
     const fx = clamp(((x + 0.5) / width) * fieldWidth - 0.5, 0, fieldWidth - 1);
@@ -629,9 +955,9 @@ function applyPaintMask(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  filter: PaintMaskFilter,
+  effect: PaintMaskEffect,
 ) {
-  if (!filter.enabled || filter.strokes.length === 0) return;
+  if (!effect.enabled || effect.strokes.length === 0) return;
   const maskCanvas = document.createElement('canvas');
   maskCanvas.width = width;
   maskCanvas.height = height;
@@ -669,7 +995,7 @@ function applyPaintMask(
     }
   };
 
-  for (const stroke of filter.strokes) {
+  for (const stroke of effect.strokes) {
     if (stroke.points.length === 0) continue;
     if (stroke.points.length === 1) {
       paintSegment(stroke, stroke.points[0], stroke.points[0]);
@@ -694,46 +1020,389 @@ function applyPaintMask(
   ctx.putImageData(source, 0, 0);
 }
 
-function PanelGroup({ title, children, defaultOpen = true }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
+function pixelGrainNoise(x: number, y: number, seed: number) {
+  const value = Math.sin((x + 1.37) * 12.9898 + (y + 4.17) * 78.233 + seed * 0.137) * 43758.5453;
+  return value - Math.floor(value);
+}
+
+function overlayBlendChannel(base: number, top: number) {
+  return base <= 0.5 ? 2 * base * top : 1 - 2 * (1 - base) * (1 - top);
+}
+
+function softLightBlendChannel(base: number, top: number) {
+  return top <= 0.5
+    ? base - (1 - 2 * top) * base * (1 - base)
+    : base + (2 * top - 1) * (Math.sqrt(Math.max(base, 0)) - base);
+}
+
+function blendPixelGrainChannel(base: number, top: number, blendMode: PixelGrainBlendMode) {
+  if (blendMode === 'multiply') return base * top;
+  if (blendMode === 'screen') return 1 - (1 - base) * (1 - top);
+  if (blendMode === 'softLight') return softLightBlendChannel(base, top);
+  return overlayBlendChannel(base, top);
+}
+
+function applyPixelGrain(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  effect: PixelGrainEffect,
+) {
+  const source = ctx.getImageData(0, 0, width, height);
+  const data = source.data;
+  const amount = clamp(effect.amount, 0, 1);
+  if (amount <= 0) return;
+  const seed = Math.round(clamp(effect.seed, 1, 9999));
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const noise = pixelGrainNoise(x, y, seed);
+      const top = clamp(0.5 + (noise - 0.5) * 0.82, 0, 1);
+      const idx = (y * width + x) * 4;
+      const baseAlpha = data[idx + 3] / 255;
+      if (baseAlpha <= 0) continue;
+      const baseR = data[idx] / 255;
+      const baseG = data[idx + 1] / 255;
+      const baseB = data[idx + 2] / 255;
+      const mixAmount = amount * baseAlpha;
+      const outR = baseR + (blendPixelGrainChannel(baseR, top, effect.blendMode) - baseR) * mixAmount;
+      const outG = baseG + (blendPixelGrainChannel(baseG, top, effect.blendMode) - baseG) * mixAmount;
+      const outB = baseB + (blendPixelGrainChannel(baseB, top, effect.blendMode) - baseB) * mixAmount;
+      data[idx] = Math.round(clamp(outR, 0, 1) * 255);
+      data[idx + 1] = Math.round(clamp(outG, 0, 1) * 255);
+      data[idx + 2] = Math.round(clamp(outB, 0, 1) * 255);
+    }
+  }
+  ctx.putImageData(source, 0, 0);
+}
+
+function applyOutlines(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  effect: OutlinesEffect,
+  timeSec: number,
+) {
+  const source = ctx.getImageData(0, 0, width, height);
+  const data = source.data;
+  const threshold = clamp(effect.threshold, 0, 1);
+  const count = Math.max(1, Math.round(effect.count));
+  const fieldScale = clamp(effect.fieldScale, 0, 1);
+  const thicknessPx = clamp(effect.thickness, 0.5, 8);
+  const spacing = clamp(effect.spacing, 0.2, 8);
+  const softness = clamp(effect.softness, 0, 1);
+  const offset = clamp(effect.offset, -1, 1);
+  const blurOffsets = getOutlinesBlurOffsets(effect.smoothing, effect.gaussianSamples);
+  const phase = effect.phase + offset + (effect.animationEnabled ? timeSec * clamp(effect.speed, 0, 3) : 0);
+  const frequency = count / spacing;
+  const contrast = 1 + fieldScale * 2;
+  const softPx = 0.5 + softness * 0.75;
+  const stops = effect.lineGradientStops.length >= 2 ? effect.lineGradientStops : OUTLINES_DEFAULT_LINE_GRADIENT;
+  const maxX = width - 1;
+  const maxY = height - 1;
+  const idxOf = (x: number, y: number) => y * width + x;
+  const smoothstep = (edge0: number, edge1: number, value: number) => {
+    const t = clamp((value - edge0) / Math.max(0.0001, edge1 - edge0), 0, 1);
+    return t * t * (3 - 2 * t);
+  };
+  const parseHexRgb = (hex: string) => {
+    const safeHex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#ffffff';
+    const value = Number.parseInt(safeHex.slice(1), 16);
+    return {
+      r: ((value >> 16) & 255) / 255,
+      g: ((value >> 8) & 255) / 255,
+      b: (value & 255) / 255,
+    };
+  };
+  const sampleLineGradient = (t: number) => {
+    const clamped = clamp(t, 0, 1);
+    let from = stops[0];
+    let to = stops[stops.length - 1];
+    for (let i = 0; i < stops.length - 1; i += 1) {
+      const left = stops[i];
+      const right = stops[i + 1];
+      if (clamped >= left.position && clamped <= right.position) {
+        from = left;
+        to = right;
+        break;
+      }
+    }
+    const range = Math.max(0.0001, to.position - from.position);
+    const local = smoothstep(0, 1, (clamped - from.position) / range);
+    const c0 = parseHexRgb(from.color);
+    const c1 = parseHexRgb(to.color);
+    return {
+      r: c0.r + (c1.r - c0.r) * local,
+      g: c0.g + (c1.g - c0.g) * local,
+      b: c0.b + (c1.b - c0.b) * local,
+      a: from.opacity + (to.opacity - from.opacity) * local,
+    };
+  };
+  const sampleField = (r: number, g: number, b: number, a: number) => {
+    const luma = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    if (effect.inputMode === 'alpha') return a / 255;
+    if (effect.inputMode === 'inverseLuma') return 1 - luma;
+    return luma;
+  };
+  const field = new Float32Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const dataIdx = (y * width + x) * 4;
+      field[idxOf(x, y)] = sampleField(data[dataIdx], data[dataIdx + 1], data[dataIdx + 2], data[dataIdx + 3]);
+    }
+  }
+  let smoothedField = field;
+  for (const rawOffset of blurOffsets) {
+    if (rawOffset <= 0) continue;
+    const sampleOffset = Math.max(1, Math.round(rawOffset));
+    const next = new Float32Array(width * height);
+    for (let y = 0; y < height; y += 1) {
+      const y0 = clamp(y - sampleOffset, 0, maxY);
+      const y1 = clamp(y + sampleOffset, 0, maxY);
+      for (let x = 0; x < width; x += 1) {
+        const x0 = clamp(x - sampleOffset, 0, maxX);
+        const x1 = clamp(x + sampleOffset, 0, maxX);
+        next[idxOf(x, y)] = (
+          smoothedField[idxOf(x0, y0)]
+          + smoothedField[idxOf(x1, y0)]
+          + smoothedField[idxOf(x0, y1)]
+          + smoothedField[idxOf(x1, y1)]
+        ) * 0.25;
+      }
+    }
+    smoothedField = next;
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixelIdx = idxOf(x, y);
+      const dataIdx = pixelIdx * 4;
+      const baseAlpha = data[dataIdx + 3] / 255;
+      if (baseAlpha <= 0) continue;
+      const baseR = data[dataIdx] / 255;
+      const baseG = data[dataIdx + 1] / 255;
+      const baseB = data[dataIdx + 2] / 255;
+      const fieldValue = smoothedField[pixelIdx];
+      const mapped = (fieldValue - threshold) * contrast;
+      const band = mapped * frequency + phase;
+      const cycle = band - Math.floor(band);
+      const distCycle = Math.abs(cycle - 0.5);
+      const left = smoothedField[idxOf(Math.max(0, x - 1), y)];
+      const right = smoothedField[idxOf(Math.min(maxX, x + 1), y)];
+      const top = smoothedField[idxOf(x, Math.max(0, y - 1))];
+      const bottom = smoothedField[idxOf(x, Math.min(maxY, y + 1))];
+      const gradX = (right - left) * 0.5;
+      const gradY = (bottom - top) * 0.5;
+      const gradBand = Math.max(0.0001, Math.hypot(gradX, gradY) * Math.abs(contrast * frequency));
+      const distPx = distCycle / gradBand;
+      const halfPx = thicknessPx * 0.5;
+      const line = 1 - smoothstep(Math.max(0, halfPx - softPx * 0.5), halfPx + softPx * 0.5, distPx);
+      const lineColor = sampleLineGradient(0.5 + mapped + offset * 0.5);
+      const amount = line * lineColor.a * baseAlpha;
+      if (amount <= 0.0001) continue;
+      data[dataIdx] = Math.round(clamp(baseR + (lineColor.r - baseR) * amount, 0, 1) * 255);
+      data[dataIdx + 1] = Math.round(clamp(baseG + (lineColor.g - baseG) * amount, 0, 1) * 255);
+      data[dataIdx + 2] = Math.round(clamp(baseB + (lineColor.b - baseB) * amount, 0, 1) * 255);
+    }
+  }
+  ctx.putImageData(source, 0, 0);
+}
+
+function PanelGroup({
+  title,
+  children,
+  headerActions,
+  defaultOpen = true,
+}: {
+  title: string;
+  children: React.ReactNode;
+  headerActions?: React.ReactNode;
+  defaultOpen?: boolean;
+}) {
   const [open, setOpen] = useState(defaultOpen);
+  const toggleOpen = () => setOpen(value => !value);
   return (
     <section className="panel-group">
-      <button className="group-title" type="button" onClick={() => setOpen(value => !value)}>
-        <span>{title}</span>
-        <span className={open ? 'chevron open' : 'chevron'}>⌄</span>
-      </button>
+      <div className="group-title">
+        <button className="group-title-toggle" type="button" onClick={toggleOpen}>
+          <span>{title}</span>
+        </button>
+        <div className="group-title-actions">
+          {headerActions}
+        </div>
+        <button
+          type="button"
+          className="group-chevron-button"
+          aria-label={open ? `收起${title}` : `展开${title}`}
+          onClick={toggleOpen}
+        >
+          <svg className={open ? 'chevron open' : 'chevron'} viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path d="m3.5 6 4.5 4.5L12.5 6" />
+          </svg>
+        </button>
+      </div>
       {open ? <div className="group-body">{children}</div> : null}
     </section>
   );
 }
 
+function parseLooseNumber(raw: string) {
+  const normalized = raw.trim().replace(/，/g, '.');
+  const match = normalized.match(/-?(?:\d+\.?\d*|\.\d+)/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function SliderField({
+  label,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+  format = nextValue => String(nextValue),
+  parseInput,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (nextValue: number) => void;
+  format?: (value: number) => string;
+  parseInput?: (raw: string) => number | null;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState(() => format(value));
+  const [isComposing, setIsComposing] = useState(false);
+
+  useEffect(() => {
+    if (isEditing) return;
+    setDraft(format(value));
+  }, [format, isEditing, value]);
+
+  const commitDraft = useCallback(() => {
+    const parsedValue = parseInput ? parseInput(draft) : parseLooseNumber(draft);
+    if (parsedValue === null) {
+      setDraft(format(value));
+      setIsEditing(false);
+      return;
+    }
+    const nextValue = clamp(parsedValue, min, max);
+    if (Math.abs(nextValue - value) > Number.EPSILON) onChange(nextValue);
+    setDraft(format(nextValue));
+    setIsEditing(false);
+  }, [draft, format, max, min, onChange, parseInput, value]);
+
+  return (
+    <label className="field">
+      <span>
+        <span>{label}</span>
+        {isEditing ? (
+          <input
+            className="field-value-input"
+            value={draft}
+            onChange={event => setDraft(event.currentTarget.value)}
+            onBlur={commitDraft}
+            onCompositionStart={() => setIsComposing(true)}
+            onCompositionEnd={() => setIsComposing(false)}
+            onKeyDown={event => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                setDraft(format(value));
+                setIsEditing(false);
+                return;
+              }
+              if (event.key !== 'Enter' || isComposing) return;
+              event.preventDefault();
+              commitDraft();
+              event.currentTarget.blur();
+            }}
+            autoFocus
+            inputMode="decimal"
+            aria-label={`${label} 数值输入`}
+          />
+        ) : (
+          <button
+            type="button"
+            className="field-value-button"
+            onClick={() => {
+              setDraft(format(value));
+              setIsEditing(true);
+            }}
+            aria-label={`编辑${label}`}
+          >
+            {format(value)}
+          </button>
+        )}
+      </span>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={event => onChange(Number(event.currentTarget.value))} />
+    </label>
+  );
+}
+
 function GradientStopsEditor({ stops, onChange }: { stops: GradientColorStop[]; onChange: (stops: GradientColorStop[]) => void }) {
-  const sorted = useMemo(() => [...stops].sort((a, b) => a.position - b.position), [stops]);
+  const [draftStops, setDraftStops] = useState<GradientColorStop[] | null>(null);
+  const draftStopsRef = useRef<GradientColorStop[] | null>(null);
+  const effective = draftStops ?? stops;
+  const sorted = useMemo(() => [...effective].sort((a, b) => a.position - b.position), [effective]);
   const sortedRef = useRef(sorted);
   const previewRef = useRef<HTMLDivElement>(null);
-  const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
+  const stopIdMapRef = useRef<WeakMap<GradientColorStop, string>>(new WeakMap());
+  const nextStopIdRef = useRef(0);
+  const [draggingStopId, setDraggingStopId] = useState<string | null>(null);
+  const [editingPositionStopId, setEditingPositionStopId] = useState<string | null>(null);
+  const [positionDraft, setPositionDraft] = useState('');
   const gradient = `linear-gradient(90deg, ${sorted.map(stop => `${stop.color}${Math.round(stop.opacity * 255).toString(16).padStart(2, '0')} ${(stop.position * 100).toFixed(1)}%`).join(', ')})`;
-  const getStopKey = (stop: GradientColorStop, index: number) => `${index}-${stop.position.toFixed(4)}`;
+  const getStopId = (stop: GradientColorStop) => {
+    const found = stopIdMapRef.current.get(stop);
+    if (found) return found;
+    const created = `stop-${nextStopIdRef.current}`;
+    nextStopIdRef.current += 1;
+    stopIdMapRef.current.set(stop, created);
+    return created;
+  };
+  const getStopKey = (stop: GradientColorStop) => getStopId(stop);
 
   useEffect(() => {
     sortedRef.current = sorted;
   }, [sorted]);
 
-  const getBoundedPosition = (index: number, position: number) => {
-    const prev = index > 0 ? sortedRef.current[index - 1]?.position ?? 0 : 0;
-    const next = index < sortedRef.current.length - 1 ? sortedRef.current[index + 1]?.position ?? 1 : 1;
-    const min = index > 0 ? prev + 0.001 : 0;
-    const max = index < sortedRef.current.length - 1 ? next - 0.001 : 1;
-    return clamp(position, min, max);
+  const getBoundedPosition = (position: number) => clamp(position, 0, 1);
+
+  const applyPatch = (source: GradientColorStop[], stopId: string, patch: Partial<GradientColorStop>) =>
+    source
+      .map(stop => {
+        if (getStopId(stop) !== stopId) return stop;
+        const updated = { ...stop, ...patch };
+        stopIdMapRef.current.set(updated, stopId);
+        return updated;
+      })
+      .sort((a, b) => a.position - b.position);
+
+  const updateStopLocal = (stopId: string, patch: Partial<GradientColorStop>) => {
+    const next = applyPatch(draftStopsRef.current ?? sortedRef.current, stopId, patch);
+    draftStopsRef.current = next;
+    setDraftStops(next);
   };
 
-  const updateStop = (index: number, patch: Partial<GradientColorStop>) => {
-    const next = sortedRef.current.map((stop, i) => i === index ? { ...stop, ...patch } : stop).sort((a, b) => a.position - b.position);
+  const commitDraft = () => {
+    const draft = draftStopsRef.current;
+    if (!draft) return;
+    draftStopsRef.current = null;
+    setDraftStops(null);
+    onChange(draft);
+  };
+
+  const updateStopImmediate = (stopId: string, patch: Partial<GradientColorStop>) => {
+    const next = applyPatch(draftStopsRef.current ?? sortedRef.current, stopId, patch);
+    draftStopsRef.current = null;
+    setDraftStops(null);
     onChange(next);
   };
 
   useEffect(() => {
-    if (draggingIndex === null) return;
+    if (draggingStopId === null) return;
 
     const handlePointerMove = (event: PointerEvent) => {
       const preview = previewRef.current;
@@ -741,10 +1410,13 @@ function GradientStopsEditor({ stops, onChange }: { stops: GradientColorStop[]; 
       const rect = preview.getBoundingClientRect();
       if (rect.width <= 0) return;
       const raw = (event.clientX - rect.left) / rect.width;
-      updateStop(draggingIndex, { position: getBoundedPosition(draggingIndex, raw) });
+      updateStopLocal(draggingStopId, { position: getBoundedPosition(raw) });
     };
 
-    const handlePointerUp = () => setDraggingIndex(null);
+    const handlePointerUp = () => {
+      commitDraft();
+      setDraggingStopId(null);
+    };
 
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
@@ -754,7 +1426,7 @@ function GradientStopsEditor({ stops, onChange }: { stops: GradientColorStop[]; 
       window.removeEventListener('pointerup', handlePointerUp);
       window.removeEventListener('pointercancel', handlePointerUp);
     };
-  }, [draggingIndex]);
+  }, [draggingStopId]);
 
   return (
     <div className="gradient-editor">
@@ -763,12 +1435,12 @@ function GradientStopsEditor({ stops, onChange }: { stops: GradientColorStop[]; 
           {sorted.map((stop, index) => (
             <button
               type="button"
-              key={getStopKey(stop, index)}
-              className={draggingIndex === index ? 'gradient-stop-handle active' : 'gradient-stop-handle'}
+              key={getStopKey(stop)}
+              className={draggingStopId === getStopId(stop) ? 'gradient-stop-handle active' : 'gradient-stop-handle'}
               style={{ left: `${stop.position * 100}%`, '--stop-color': stop.color } as React.CSSProperties & { '--stop-color': string }}
               onPointerDown={event => {
                 event.preventDefault();
-                setDraggingIndex(index);
+                setDraggingStopId(getStopId(stop));
               }}
               aria-label={`拖动颜色节点 ${index + 1}`}
             />
@@ -776,8 +1448,8 @@ function GradientStopsEditor({ stops, onChange }: { stops: GradientColorStop[]; 
         </div>
       </div>
       {sorted.map((stop, index) => (
-        <div className="stop-row" key={getStopKey(stop, index)}>
-          <ColorInput value={stop.color} onChange={color => updateStop(index, { color })} ariaLabel={`编辑颜色节点 ${index + 1}`} />
+        <div className="stop-row" key={getStopKey(stop)}>
+          <ColorInput value={stop.color} onChange={color => updateStopImmediate(getStopId(stop), { color })} ariaLabel={`编辑颜色节点 ${index + 1}`} />
           <label>
             <span>位置</span>
             <div className="stop-position-input">
@@ -786,10 +1458,31 @@ function GradientStopsEditor({ stops, onChange }: { stops: GradientColorStop[]; 
                 min={0}
                 max={100}
                 step={1}
-                value={Math.round(stop.position * 100)}
+                value={editingPositionStopId === getStopId(stop) ? positionDraft : Math.round(stop.position * 100)}
+                onFocus={() => {
+                  setEditingPositionStopId(getStopId(stop));
+                  setPositionDraft(String(Math.round(stop.position * 100)));
+                }}
                 onChange={event => {
-                  if (Number.isNaN(event.currentTarget.valueAsNumber)) return;
-                  updateStop(index, { position: getBoundedPosition(index, event.currentTarget.valueAsNumber / 100) });
+                  setPositionDraft(event.currentTarget.value);
+                }}
+                onBlur={() => {
+                  const parsed = parseInt(positionDraft, 10);
+                  if (!Number.isNaN(parsed)) {
+                    const newPos = getBoundedPosition(parsed / 100);
+                    if (Math.round(newPos * 100) !== Math.round(stop.position * 100)) {
+                      updateStopImmediate(getStopId(stop), { position: newPos });
+                    }
+                  }
+                  setEditingPositionStopId(null);
+                }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') {
+                    event.currentTarget.blur();
+                  } else if (event.key === 'Escape') {
+                    setPositionDraft(String(Math.round(stop.position * 100)));
+                    event.currentTarget.blur();
+                  }
                 }}
               />
               <span>%</span>
@@ -797,12 +1490,23 @@ function GradientStopsEditor({ stops, onChange }: { stops: GradientColorStop[]; 
           </label>
           <label>
             <span>透明度</span>
-            <input type="range" min={0} max={1} step={0.01} value={stop.opacity} onChange={event => updateStop(index, { opacity: Number(event.currentTarget.value) })} />
+            <input type="range" min={0} max={1} step={0.01} value={stop.opacity}
+              onChange={event => updateStopLocal(getStopId(stop), { opacity: Number(event.currentTarget.value) })}
+              onPointerUp={() => commitDraft()}
+            />
           </label>
-          <button type="button" disabled={sorted.length <= 2} onClick={() => onChange(sorted.filter((_, i) => i !== index))}>删除</button>
+          <button type="button" disabled={sorted.length <= 2} onClick={() => {
+            draftStopsRef.current = null;
+            setDraftStops(null);
+            onChange(sorted.filter((_, i) => i !== index));
+          }}>删除</button>
         </div>
       ))}
-      <button type="button" className="wide-button" disabled={sorted.length >= 8} onClick={() => onChange([...sorted, { position: 0.5, color: '#ffffff', opacity: 1 }].sort((a, b) => a.position - b.position))}>
+      <button type="button" className="wide-button" disabled={sorted.length >= 8} onClick={() => {
+        draftStopsRef.current = null;
+        setDraftStops(null);
+        onChange([...sorted, { position: 0.5, color: '#ffffff', opacity: 1 }].sort((a, b) => a.position - b.position));
+      }}>
         添加颜色
       </button>
     </div>
@@ -811,6 +1515,9 @@ function GradientStopsEditor({ stops, onChange }: { stops: GradientColorStop[]; 
 
 export default function App() {
   const [layerState, setLayerState] = useState<TextureLayerState>(() => loadLocalLayerState());
+  const [dynamicImageAssets, setDynamicImageAssets] = useState<Record<string, DynamicImageAsset>>({});
+  const [dynamicImageUploadError, setDynamicImageUploadError] = useState<string | null>(null);
+  const [isDynamicImageUploading, setIsDynamicImageUploading] = useState(false);
   const [presets, setPresets] = useState<TexturePreset[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draggingLayerId, setDraggingLayerId] = useState<string | null>(null);
@@ -833,6 +1540,8 @@ export default function App() {
   const lastPaintMaskPointRef = useRef<SmudgeDistortionPoint | null>(null);
   const layerRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const selectedIdRef = useRef<string | null>(null);
+  const dynamicImageAssetsRef = useRef<Record<string, DynamicImageAsset>>({});
+  const dynamicImageInputRef = useRef<HTMLInputElement>(null);
   const stageViewportRef = useRef<HTMLDivElement>(null);
   const compositeFrameRef = useRef(0);
   const compositeNeedsFollowupRef = useRef(false);
@@ -852,9 +1561,10 @@ export default function App() {
     [layerState.layers, layerState.selectedLayerId],
   );
   const selectedTextureLayer = selectedLayer?.kind === 'texture' ? selectedLayer : null;
-  const selectedFilterLayer = selectedLayer?.kind === 'filter' ? selectedLayer : null;
+  const selectedEffectLayer = selectedLayer?.kind === 'effect' ? selectedLayer : null;
   const settings = selectedTextureLayer?.settings ?? TEXTURE_DEFAULTS;
-  const filterSettings = selectedFilterLayer?.filter ?? null;
+  const effectSettings = selectedEffectLayer?.effect ?? null;
+  const selectedDynamicImageAsset = selectedTextureLayer ? dynamicImageAssets[selectedTextureLayer.id] ?? null : null;
   const displayedLayers = useMemo(() => {
     if (!dragPreviewOrder) return layerState.layers;
     const layerMap = new Map(layerState.layers.map(layer => [layer.id, layer]));
@@ -866,9 +1576,10 @@ export default function App() {
   useEffect(() => {
     readPresetFile().then(file => {
       setPresets(file.presets);
-      setSelectedId(file.selectedId);
-      selectedIdRef.current = file.selectedId;
-      const selected = file.presets.find(preset => preset.id === file.selectedId);
+      const nextSelectedId = file.selectedId ?? file.presets[0]?.id ?? null;
+      setSelectedId(nextSelectedId);
+      selectedIdRef.current = nextSelectedId;
+      const selected = file.presets.find(preset => preset.id === nextSelectedId);
       if (selected) {
         setLayerState(sanitizeTextureLayerState(selected.layerState));
       }
@@ -882,6 +1593,41 @@ export default function App() {
   useEffect(() => {
     dragPreviewOrderRef.current = dragPreviewOrder;
   }, [dragPreviewOrder]);
+
+  useEffect(() => {
+    dynamicImageAssetsRef.current = dynamicImageAssets;
+  }, [dynamicImageAssets]);
+
+  useEffect(() => {
+    setDynamicImageUploadError(null);
+  }, [layerState.selectedLayerId]);
+
+  useEffect(() => {
+    setDynamicImageAssets(prev => {
+      const validTextureLayers = new Set(
+        layerState.layers
+          .filter((layer): layer is TextureLayer => layer.kind === 'texture' && layer.settings.textureType === 'dynamicImage')
+          .map(layer => layer.id),
+      );
+      let changed = false;
+      const next: Record<string, DynamicImageAsset> = {};
+      for (const [layerId, asset] of Object.entries(prev)) {
+        if (validTextureLayers.has(layerId)) {
+          next[layerId] = asset;
+        } else {
+          releaseDynamicImageAsset(asset);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [layerState.layers]);
+
+  useEffect(() => () => {
+    for (const asset of Object.values(dynamicImageAssetsRef.current)) {
+      releaseDynamicImageAsset(asset);
+    }
+  }, []);
 
   useEffect(() => {
     setCanvasWidthInput(String(canvasWidth));
@@ -914,8 +1660,22 @@ export default function App() {
     [presets, selectedId],
   );
   const compositeLayerSignature = useMemo(() => getCompositeLayerSignature(layerState.layers), [layerState.layers]);
-  const hasContinuousComposite = useMemo(
-    () => layerState.layers.some(layer => layer.kind === 'texture' && layer.visible !== false && textureNeedsContinuousComposite(layer.settings)),
+  const hasContinuousTextureSource = useMemo(
+    () => layerState.layers.some(layer => (
+      layer.kind === 'texture'
+      && layer.visible !== false
+      && textureNeedsContinuousComposite(layer.settings)
+    )),
+    [layerState.layers],
+  );
+  const hasContinuousEffectAnimation = useMemo(
+    () => layerState.layers.some(layer => (
+      layer.visible !== false
+      && (
+        (layer.kind === 'effect' && layer.effect.type === 'dynamicImageEffect' && layer.effect.enabled && layer.effect.opacity > 0 && layer.effect.strength > 0)
+        || (layer.kind === 'effect' && layer.effect.type === 'outlines' && layer.effect.enabled && layer.effect.animationEnabled && layer.effect.count > 0 && layer.effect.thickness > 0 && layer.effect.speed > 0)
+      )
+    )),
     [layerState.layers],
   );
   const serializedSelectedPresetState = useMemo(
@@ -978,12 +1738,13 @@ export default function App() {
   const drawComposite = useCallback(() => {
     const canvas = compositeCanvasRef.current;
     if (!canvas) return;
+    const canUseSignatureCache = !hasContinuousEffectAnimation;
     const sourceVersions = layerState.layers.map(layer => {
-      if (layer.kind === 'filter') return `${layer.id}:filter:${layer.visible}`;
+      if (layer.kind === 'effect') return `${layer.id}:effect:${layer.visible}`;
       return `${layer.id}:${layer.visible}:${layerCanvasRefs.current[layer.id]?.getFrameVersion() ?? 0}`;
     }).join('|');
     const signature = `${canvasWidth}x${canvasHeight}:${compositeLayerSignature}:${sourceVersions}`;
-    if (signature === lastCompositeSignatureRef.current) return;
+    if (canUseSignatureCache && signature === lastCompositeSignatureRef.current) return;
     try {
       drawLayerStack(canvas, layerState.layers, layerCanvasRefs.current, canvasWidth, canvasHeight);
       const hasReadyTextureLayer = layerState.layers.some(layer => (
@@ -1001,7 +1762,7 @@ export default function App() {
         setProcessingTask(null);
       }
     }
-  }, [canvasHeight, canvasWidth, compositeLayerSignature, layerState.layers, markCanvasActivity]);
+  }, [canvasHeight, canvasWidth, compositeLayerSignature, hasContinuousEffectAnimation, layerState.layers, markCanvasActivity]);
 
   const requestCompositeDraw = useCallback(() => {
     if (compositeFrameRef.current) {
@@ -1057,7 +1818,7 @@ export default function App() {
   }, [drawComposite, requestCompositeDraw]);
 
   useEffect(() => {
-    if (!hasContinuousComposite) return;
+    if (!hasContinuousEffectAnimation || hasContinuousTextureSource) return;
     let frame = 0;
     const tick = () => {
       drawComposite();
@@ -1067,11 +1828,15 @@ export default function App() {
     return () => {
       cancelAnimationFrame(frame);
     };
-  }, [drawComposite, hasContinuousComposite]);
+  }, [drawComposite, hasContinuousEffectAnimation, hasContinuousTextureSource]);
 
   useEffect(() => {
     return () => {
-      if (compositeFrameRef.current) cancelAnimationFrame(compositeFrameRef.current);
+      if (compositeFrameRef.current) {
+        cancelAnimationFrame(compositeFrameRef.current);
+        compositeFrameRef.current = 0;
+      }
+      compositeNeedsFollowupRef.current = false;
       if (processingCommitTimeoutRef.current) window.clearTimeout(processingCommitTimeoutRef.current);
       if (loaderSettleTimerRef.current) window.clearTimeout(loaderSettleTimerRef.current);
       if (loaderHardStopTimerRef.current) window.clearTimeout(loaderHardStopTimerRef.current);
@@ -1091,6 +1856,62 @@ export default function App() {
     setLayerState(prev => updateSelectedLayer(prev, layer => ({ ...layer, settings: sanitizeTextureSettings(next) })));
   };
 
+  const applyDynamicImageFile = useCallback(async (file: File) => {
+    if (!selectedTextureLayer || selectedTextureLayer.settings.textureType !== 'dynamicImage') return;
+    setIsDynamicImageUploading(true);
+    setDynamicImageUploadError(null);
+    try {
+      const loadedAsset = await loadDynamicImageFile(file);
+      setDynamicImageAssets(prev => {
+        const previous = prev[selectedTextureLayer.id];
+        if (previous) {
+          releaseDynamicImageAsset(previous);
+        }
+        return { ...prev, [selectedTextureLayer.id]: loadedAsset };
+      });
+      beginCanvasUpdate();
+      setLayerState(prev => updateSelectedLayer(prev, layer => {
+        if (layer.id !== selectedTextureLayer.id) return layer;
+        return {
+          ...layer,
+          settings: sanitizeTextureSettings({
+            ...layer.settings,
+            dynamicImageAssetId: loadedAsset.id,
+            dynamicImageAssetName: loadedAsset.name,
+            dynamicImageAssetWidth: loadedAsset.width,
+            dynamicImageAssetHeight: loadedAsset.height,
+          }),
+        };
+      }));
+    } catch (error) {
+      setDynamicImageUploadError(error instanceof Error ? error.message : '图像上传失败，请重试');
+    } finally {
+      setIsDynamicImageUploading(false);
+      if (dynamicImageInputRef.current) {
+        dynamicImageInputRef.current.value = '';
+      }
+    }
+  }, [beginCanvasUpdate, selectedTextureLayer]);
+
+  const removeSelectedDynamicImage = useCallback(() => {
+    if (!selectedTextureLayer || selectedTextureLayer.settings.textureType !== 'dynamicImage') return;
+    setDynamicImageUploadError(null);
+    setDynamicImageAssets(prev => {
+      const previous = prev[selectedTextureLayer.id];
+      if (!previous) return prev;
+      releaseDynamicImageAsset(previous);
+      const next = { ...prev };
+      delete next[selectedTextureLayer.id];
+      return next;
+    });
+    updateSettings({
+      dynamicImageAssetId: '',
+      dynamicImageAssetName: '',
+      dynamicImageAssetWidth: 0,
+      dynamicImageAssetHeight: 0,
+    });
+  }, [selectedTextureLayer, updateSettings]);
+
   const commitCanvasDimension = (
     draftValue: string,
     committedValue: number,
@@ -1109,73 +1930,290 @@ export default function App() {
   };
 
   const isTextureLayerSelected = selectedLayer?.kind === 'texture';
-  const isFilterLayerSelected = selectedLayer?.kind === 'filter';
+  const isEffectLayerSelected = selectedLayer?.kind === 'effect';
   const isHalftoneTexture = isTextureLayerSelected && settings.textureType === 'halftone';
   const isGradientTexture = isTextureLayerSelected && settings.textureType === 'gradient';
+  const isDynamicImageTexture = isTextureLayerSelected && settings.textureType === 'dynamicImage';
+  const textureTransformBounds = isGradientTexture ? GRADIENT_ALGO_TRANSFORM_PARAM_BOUNDS : TRANSFORM_PARAM_BOUNDS_DEFAULT;
+  const textureTransformParamDefs = isGradientTexture ? GRADIENT_ALGO_TRANSFORM_PARAM_DEFS : TRANSFORM_PARAM_DEFS;
   const currentTextureDefaults = useMemo(
     () => getTextureDefaults(settings.textureType),
     [settings.textureType],
   );
+  const effectTransformEnabled = effectSettings ? effectSupportsTransform(effectSettings) : false;
+  const textureTransform = useMemo(
+    () => clampTransformParamsToSize(settings.transform, canvasWidth, canvasHeight, textureTransformBounds),
+    [canvasHeight, canvasWidth, settings.transform, textureTransformBounds],
+  );
+  const textureDefaultTransform = useMemo(
+    () => clampTransformParamsToSize(currentTextureDefaults.transform, canvasWidth, canvasHeight, textureTransformBounds),
+    [canvasHeight, canvasWidth, currentTextureDefaults.transform, textureTransformBounds],
+  );
+  const isTextureTransformDefault = isSameTransformParams(textureTransform, textureDefaultTransform);
+  const effectTransform = useMemo(() => {
+    if (!effectSettings) return TRANSFORM_PARAMS_DEFAULTS;
+    if (effectSettings.type === 'smudgeDistortion') {
+      return clampTransformParamsToSize(effectSettings.transform, canvasWidth, canvasHeight, TRANSFORM_PARAM_BOUNDS_DEFAULT);
+    }
+    if (effectSettings.type === 'dynamicImageEffect' && isDynamicImageDeformationAlgorithm(effectSettings.algorithm)) {
+      return clampTransformParamsToSize(effectSettings.transform, canvasWidth, canvasHeight, TRANSFORM_PARAM_BOUNDS_DEFAULT);
+    }
+    return TRANSFORM_PARAMS_DEFAULTS;
+  }, [canvasHeight, canvasWidth, effectSettings]);
+  const isEffectTransformDefault = isDefaultTransformParams(effectTransform);
+  const currentGradientAlgorithm = useMemo(
+    () => getGradientAlgorithmDef(settings.gradientAnimType),
+    [settings.gradientAnimType],
+  );
+  const currentDynamicImageEffectAlgorithm = useMemo(
+    () => getDynamicImageAlgorithmDef(effectSettings?.type === 'dynamicImageEffect' ? effectSettings.algorithm : 'flowDistort'),
+    [effectSettings],
+  );
 
-  const range = (key: NumberKey, label: string, min: number, max: number, step: number, format: (value: number) => string = value => String(value)) => {
-    const value = Number(settings[key]);
-    return (
-      <label className="field" key={key}>
-        <span><span>{label}</span><b>{format(value)}</b></span>
-        <input type="range" min={min} max={max} step={step} value={value} onChange={event => updateSettings({ [key]: Number(event.currentTarget.value) })} />
-      </label>
-    );
-  };
+  useEffect(() => {
+    if (!isGradientTexture || isGradientAlgorithm(settings.gradientAnimType)) return;
+    const defaultAlgorithm = getGradientAlgorithmDef('flow');
+    updateSettings({
+      gradientAnimType: defaultAlgorithm.id,
+      ...defaultAlgorithm.defaults,
+      gradientStops: isGrayscaleStops(settings.gradientStops) ? FLOW_DEFAULT_STOPS : settings.gradientStops,
+    });
+  }, [isGradientTexture, settings.gradientAnimType, settings.gradientStops]);
 
-  const setSelectedFilterState = (nextFilter: TextureFilter) => {
-    beginCanvasUpdate();
-    setLayerState(prev => updateSelectedFilter(prev, layer => ({
-      ...layer,
-      filter: sanitizeTextureFilter(nextFilter),
-    })));
-  };
-
-  const updateSelectedSmudgeFilterSettings = (patch: Partial<SmudgeDistortionFilter>) => {
-    if (!filterSettings || filterSettings.type !== 'smudgeDistortion') return;
-    setSelectedFilterState({ ...filterSettings, ...patch });
-  };
-
-  const updateSelectedPaintMaskSettings = (patch: Partial<PaintMaskFilter>) => {
-    if (!filterSettings || filterSettings.type !== 'paintMask') return;
-    setSelectedFilterState({ ...filterSettings, ...patch });
-  };
-
-  const filterRange = (
-    key: Extract<keyof SmudgeDistortionFilter, 'strength' | 'precision' | 'brushSize' | 'brushStrength' | 'brushFeather'>,
+  const range = (
+    key: NumberKey,
     label: string,
     min: number,
     max: number,
     step: number,
     format: (value: number) => string = value => String(value),
+    parseInput?: (raw: string) => number | null,
   ) => {
-    const value = Number(filterSettings && filterSettings.type === 'smudgeDistortion' ? filterSettings[key] : 0);
+    const value = Number(settings[key]);
     return (
-      <label className="field" key={key}>
-        <span><span>{label}</span><b>{format(value)}</b></span>
-        <input type="range" min={min} max={max} step={step} value={value} onChange={event => updateSelectedSmudgeFilterSettings({ [key]: Number(event.currentTarget.value) })} />
-      </label>
+      <SliderField
+        key={key}
+        label={label}
+        value={value}
+        min={min}
+        max={max}
+        step={step}
+        format={format}
+        parseInput={parseInput}
+        onChange={nextValue => updateSettings({ [key]: nextValue })}
+      />
+    );
+  };
+
+  const transformRange = (
+    transform: TransformParams,
+    onChange: (next: TransformParams) => void,
+    key: TransformParamKey,
+    format: (value: number) => string,
+    defs = TRANSFORM_PARAM_DEFS,
+    bounds = TRANSFORM_PARAM_BOUNDS_DEFAULT,
+  ) => {
+    const def = defs.find(item => item.key === key);
+    if (!def) return null;
+    const min = key === 'offsetX' ? -canvasWidth : key === 'offsetY' ? -canvasHeight : def.min;
+    const max = key === 'offsetX' ? canvasWidth : key === 'offsetY' ? canvasHeight : def.max;
+    return (
+      <SliderField
+        key={key}
+        label={def.label}
+        value={transform[key]}
+        min={min}
+        max={max}
+        step={def.step}
+        format={format}
+        onChange={nextValue => {
+          const next = sanitizeTransformParams({ ...transform, [key]: nextValue }, TRANSFORM_PARAMS_DEFAULTS, bounds);
+          onChange(clampTransformParamsToSize(next, canvasWidth, canvasHeight, bounds));
+        }}
+      />
+    );
+  };
+
+  const setSelectedEffectState = (nextEffect: TextureEffect) => {
+    beginCanvasUpdate();
+    setLayerState(prev => updateSelectedEffect(prev, layer => ({
+      ...layer,
+      effect: sanitizeTextureEffect(nextEffect),
+    })));
+  };
+
+  const updateSelectedSmudgeEffectSettings = (patch: Partial<SmudgeDistortionEffect>) => {
+    if (!effectSettings || effectSettings.type !== 'smudgeDistortion') return;
+    setSelectedEffectState({ ...effectSettings, ...patch });
+  };
+
+  const updateSelectedPaintMaskSettings = (patch: Partial<PaintMaskEffect>) => {
+    if (!effectSettings || effectSettings.type !== 'paintMask') return;
+    setSelectedEffectState({ ...effectSettings, ...patch });
+  };
+
+  const updateSelectedPixelGrainSettings = (patch: Partial<PixelGrainEffect>) => {
+    if (!effectSettings || effectSettings.type !== 'pixelGrain') return;
+    setSelectedEffectState({ ...effectSettings, ...patch });
+  };
+
+  const updateSelectedDynamicImageEffectSettings = (patch: Partial<DynamicImageEffect>) => {
+    if (!effectSettings || effectSettings.type !== 'dynamicImageEffect') return;
+    setSelectedEffectState({ ...effectSettings, ...patch });
+  };
+
+  const updateSelectedOutlinesSettings = (patch: Partial<OutlinesEffect>) => {
+    if (!effectSettings || effectSettings.type !== 'outlines') return;
+    setSelectedEffectState({ ...effectSettings, ...patch });
+  };
+
+  const updateTextureTransform = (nextTransform: TransformParams) => {
+    if (!isTextureLayerSelected) return;
+    const transform = clampTransformParamsToSize(nextTransform, canvasWidth, canvasHeight, textureTransformBounds);
+    updateSettings({
+      transform,
+      spotScale: transform.scale,
+      spotOffsetX: transform.offsetX,
+      spotOffsetY: transform.offsetY,
+      dynamicImageScale: transform.scale,
+      dynamicImageAspectRatio: transform.aspectRatio,
+      dynamicImageOffsetX: transform.offsetX,
+      dynamicImageOffsetY: transform.offsetY,
+    });
+  };
+
+  const updateEffectTransform = (nextTransform: TransformParams) => {
+    if (!effectSettings || !effectSupportsTransform(effectSettings)) return;
+    const transform = clampTransformParamsToSize(nextTransform, canvasWidth, canvasHeight, TRANSFORM_PARAM_BOUNDS_DEFAULT);
+    if (effectSettings.type === 'smudgeDistortion') {
+      updateSelectedSmudgeEffectSettings({ transform });
+      return;
+    }
+    updateSelectedDynamicImageEffectSettings({ transform });
+  };
+
+  const effectRange = (
+    key: Extract<keyof SmudgeDistortionEffect, 'strength' | 'precision' | 'brushSize' | 'brushStrength' | 'brushFeather'>,
+    label: string,
+    min: number,
+    max: number,
+    step: number,
+    format: (value: number) => string = value => String(value),
+    parseInput?: (raw: string) => number | null,
+  ) => {
+    const value = Number(effectSettings && effectSettings.type === 'smudgeDistortion' ? effectSettings[key] : 0);
+    return (
+      <SliderField
+        key={key}
+        label={label}
+        value={value}
+        min={min}
+        max={max}
+        step={step}
+        format={format}
+        parseInput={parseInput}
+        onChange={nextValue => updateSelectedSmudgeEffectSettings({ [key]: nextValue })}
+      />
     );
   };
 
   const paintMaskRange = (
-    key: Extract<keyof PaintMaskFilter, 'brushSize' | 'brushOpacity' | 'brushFeather'>,
+    key: Extract<keyof PaintMaskEffect, 'brushSize' | 'brushOpacity' | 'brushFeather'>,
     label: string,
     min: number,
     max: number,
     step: number,
     format: (value: number) => string = value => String(value),
+    parseInput?: (raw: string) => number | null,
   ) => {
-    const value = Number(filterSettings && filterSettings.type === 'paintMask' ? filterSettings[key] : 0);
+    const value = Number(effectSettings && effectSettings.type === 'paintMask' ? effectSettings[key] : 0);
     return (
-      <label className="field" key={key}>
-        <span><span>{label}</span><b>{format(value)}</b></span>
-        <input type="range" min={min} max={max} step={step} value={value} onChange={event => updateSelectedPaintMaskSettings({ [key]: Number(event.currentTarget.value) })} />
-      </label>
+      <SliderField
+        key={key}
+        label={label}
+        value={value}
+        min={min}
+        max={max}
+        step={step}
+        format={format}
+        parseInput={parseInput}
+        onChange={nextValue => updateSelectedPaintMaskSettings({ [key]: nextValue })}
+      />
+    );
+  };
+
+  const pixelGrainRange = (
+    key: Extract<keyof PixelGrainEffect, 'amount'>,
+    label: string,
+    min: number,
+    max: number,
+    step: number,
+    format: (value: number) => string = value => String(value),
+    parseInput?: (raw: string) => number | null,
+  ) => {
+    const value = Number(effectSettings && effectSettings.type === 'pixelGrain' ? effectSettings[key] : 0);
+    return (
+      <SliderField
+        key={key}
+        label={label}
+        value={value}
+        min={min}
+        max={max}
+        step={step}
+        format={format}
+        parseInput={parseInput}
+        onChange={nextValue => updateSelectedPixelGrainSettings({ [key]: nextValue })}
+      />
+    );
+  };
+
+  const dynamicImageEffectRange = (
+    key: Extract<keyof DynamicImageEffect, 'speed' | 'strength' | 'paramA' | 'paramB' | 'opacity'>,
+    label: string,
+    min: number,
+    max: number,
+    step: number,
+    format: (value: number) => string = value => String(value),
+    parseInput?: (raw: string) => number | null,
+  ) => {
+    const value = Number(effectSettings && effectSettings.type === 'dynamicImageEffect' ? effectSettings[key] : 0);
+    return (
+      <SliderField
+        key={key}
+        label={label}
+        value={value}
+        min={min}
+        max={max}
+        step={step}
+        format={format}
+        parseInput={parseInput}
+        onChange={nextValue => updateSelectedDynamicImageEffectSettings({ [key]: nextValue })}
+      />
+    );
+  };
+
+  const outlinesRange = (
+    key: Exclude<keyof OutlinesEffect, 'type' | 'enabled' | 'inputMode' | 'fieldScale' | 'lineGradientStops' | 'animationEnabled'>,
+    label: string,
+    min: number,
+    max: number,
+    step: number,
+    format: (value: number) => string = value => String(value),
+    parseInput?: (raw: string) => number | null,
+  ) => {
+    const value = Number(effectSettings && effectSettings.type === 'outlines' ? effectSettings[key] : 0);
+    return (
+      <SliderField
+        key={key}
+        label={label}
+        value={value}
+        min={min}
+        max={max}
+        step={step}
+        format={format}
+        parseInput={parseInput}
+        onChange={nextValue => updateSelectedOutlinesSettings({ [key]: nextValue })}
+      />
     );
   };
 
@@ -1219,13 +2257,8 @@ export default function App() {
   };
 
   const handlePresetChange = (nextValue: string) => {
-    const nextId = nextValue || null;
+    const nextId = nextValue;
     if (!confirmPresetSwitch(nextId)) return;
-    if (!nextValue) {
-      selectedIdRef.current = null;
-      setSelectedId(null);
-      return;
-    }
     void applyPreset(nextValue);
   };
 
@@ -1239,15 +2272,18 @@ export default function App() {
 
   const deletePreset = async () => {
     if (!selectedId) return;
+    if (presets.length <= 1) return;
     const preset = presets.find(item => item.id === selectedId);
     if (!preset) return;
     const confirmed = window.confirm(`确定删除预设「${preset.name}」吗？此操作无法撤销。`);
     if (!confirmed) return;
     const nextPresets = presets.filter(preset => preset.id !== selectedId);
-    const file = await writePresetFile({ selectedId: null, presets: nextPresets });
+    const nextSelectedId = nextPresets[0]?.id ?? null;
+    const file = await writePresetFile({ selectedId: nextSelectedId, presets: nextPresets });
     setPresets(file.presets);
-    setSelectedId(null);
-    selectedIdRef.current = null;
+    const selectedFromFile = file.selectedId ?? file.presets[0]?.id ?? null;
+    setSelectedId(selectedFromFile);
+    selectedIdRef.current = selectedFromFile;
   };
 
   const renamePreset = async () => {
@@ -1273,9 +2309,12 @@ export default function App() {
     });
   };
 
-  const addFilterLayer = () => {
+  const addEffectLayer = () => {
     setLayerState(prev => {
-      const nextLayer = createSmudgeFilterLayer(prev.layers.filter(layer => layer.kind === 'filter').length + 1);
+      const nextLayer = createEffectLayer(
+        prev.layers.filter(layer => layer.kind === 'effect').length + 1,
+        createDynamicImageEffect('flowDistort'),
+      );
       return {
         layers: [nextLayer, ...prev.layers],
         selectedLayerId: nextLayer.id,
@@ -1290,40 +2329,48 @@ export default function App() {
     }));
   };
 
-  const updateFilterLayer = (id: string, patch: Partial<Pick<FilterLayer, 'name' | 'visible' | 'filter'>>) => {
+  const updateEffectLayer = (id: string, patch: Partial<Pick<EffectLayer, 'name' | 'visible' | 'effect'>>) => {
     setLayerState(prev => ({
       ...prev,
       layers: prev.layers.map(layer => (
-        layer.id === id && layer.kind === 'filter'
+        layer.id === id && layer.kind === 'effect'
           ? {
               ...layer,
               ...patch,
-              filter: patch.filter ? sanitizeTextureFilter(patch.filter) : layer.filter,
+              effect: patch.effect ? sanitizeTextureEffect(patch.effect) : layer.effect,
             }
           : layer
       )),
     }));
   };
 
-  const changeSelectedFilterType = (nextType: TextureFilter['type']) => {
-    if (!selectedFilterLayer) return;
-    updateFilterLayer(selectedFilterLayer.id, {
-      filter: nextType === 'paintMask'
-        ? createPaintMaskFilter()
-        : sanitizeSmudgeDistortionFilter({
-            enabled: true,
-            strength: 1,
-            precision: 2,
-            brushEnabled: true,
-            brushSize: 80,
-            brushStrength: 0.45,
-            brushFeather: 48,
-            strokes: [],
-          }),
+  const changeSelectedEffectType = (nextValue: string) => {
+    if (!selectedEffectLayer) return;
+    const { type: nextType, algorithm } = parseEffectTypeSelectValue(nextValue);
+    const nextEffect =
+      nextType === 'paintMask'
+        ? createPaintMaskEffect()
+        : nextType === 'pixelGrain'
+          ? createPixelGrainEffect()
+          : nextType === 'outlines'
+            ? createOutlinesEffect()
+          : nextType === 'dynamicImageEffect'
+          ? createDynamicImageEffect(algorithm ?? 'flowDistort')
+          : createSmudgeDistortionEffect();
+    updateEffectLayer(selectedEffectLayer.id, {
+      effect: nextEffect,
     });
   };
 
   const deleteLayer = (id: string) => {
+    setDynamicImageAssets(prev => {
+      const previous = prev[id];
+      if (!previous) return prev;
+      releaseDynamicImageAsset(previous);
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     setLayerState(prev => {
       if (prev.layers.length <= 1) return prev;
       const deleteIndex = prev.layers.findIndex(layer => layer.id === id);
@@ -1454,20 +2501,24 @@ export default function App() {
     link.click();
   };
 
-  const syncFilterBrushPreview = (point: SmudgeDistortionPoint | null) => {
+  const syncEffectBrushPreview = (point: SmudgeDistortionPoint | null) => {
     const preview = smudgeBrushPreviewRef.current;
     const inner = smudgeBrushPreviewInnerRef.current;
-    if (!preview || !inner || !filterSettings || !point) {
+    if (!preview || !inner || !effectSettings || !point) {
       if (preview) preview.style.opacity = '0';
       return;
     }
-    const isBrushEnabled = filterSettings.brushEnabled;
+    if (effectSettings.type === 'pixelGrain' || effectSettings.type === 'dynamicImageEffect' || effectSettings.type === 'outlines') {
+      preview.style.opacity = '0';
+      return;
+    }
+    const isBrushEnabled = effectSettings.brushEnabled;
     if (!isBrushEnabled) {
       preview.style.opacity = '0';
       return;
     }
-    const size = Math.max(4, filterSettings.brushSize);
-    const feather = Math.max(0, filterSettings.brushFeather);
+    const size = Math.max(4, effectSettings.brushSize);
+    const feather = Math.max(0, effectSettings.brushFeather);
     const scale = previewScale;
     const outerSize = (size + feather * 2) * scale;
     const innerSize = size * scale;
@@ -1478,17 +2529,17 @@ export default function App() {
     preview.style.height = `${outerSize}px`;
     inner.style.width = `${innerSize}px`;
     inner.style.height = `${innerSize}px`;
-    if (filterSettings.type === 'paintMask') {
-      const opacity = Math.max(0, Math.min(1, filterSettings.brushOpacity));
-      preview.style.borderColor = filterSettings.brush === 'white' ? 'rgba(17,24,39,0.8)' : 'rgba(255,255,255,0.95)';
-      preview.style.background = filterSettings.brush === 'white'
+    if (effectSettings.type === 'paintMask') {
+      const opacity = Math.max(0, Math.min(1, effectSettings.brushOpacity));
+      preview.style.borderColor = effectSettings.brush === 'white' ? 'rgba(17,24,39,0.8)' : 'rgba(255,255,255,0.95)';
+      preview.style.background = effectSettings.brush === 'white'
         ? `rgba(255,255,255,${Math.max(0.04, opacity * 0.14)})`
         : `rgba(0,0,0,${Math.max(0.04, opacity * 0.14)})`;
-      preview.style.boxShadow = filterSettings.brush === 'white'
+      preview.style.boxShadow = effectSettings.brush === 'white'
         ? '0 0 0 1px rgba(255,255,255,0.6)'
         : '0 0 0 1px rgba(0,0,0,0.35)';
       inner.style.opacity = feather > 0 ? `${Math.max(0.15, opacity * 0.85)}` : '0';
-      inner.style.borderColor = filterSettings.brush === 'white' ? 'rgba(17,24,39,0.45)' : 'rgba(255,255,255,0.55)';
+      inner.style.borderColor = effectSettings.brush === 'white' ? 'rgba(17,24,39,0.45)' : 'rgba(255,255,255,0.55)';
     } else {
       preview.style.borderColor = 'rgba(255,255,255,0.95)';
       preview.style.background = 'transparent';
@@ -1520,13 +2571,13 @@ export default function App() {
     processingCommitTimeoutRef.current = window.setTimeout(() => {
       pendingProcessingCommitRef.current = false;
       processingCommitTimeoutRef.current = 0;
-      setLayerState(prev => updateSelectedFilter(prev, layer => {
-        if (layer.filter.type !== 'smudgeDistortion') return layer;
+      setLayerState(prev => updateSelectedEffect(prev, layer => {
+        if (layer.effect.type !== 'smudgeDistortion') return layer;
         return {
           ...layer,
-          filter: sanitizeSmudgeDistortionFilter({
-            ...layer.filter,
-            strokes: [...layer.filter.strokes, stroke].slice(-80),
+          effect: sanitizeSmudgeDistortionEffect({
+            ...layer.effect,
+            strokes: [...layer.effect.strokes, stroke].slice(-80),
           }),
         };
       }));
@@ -1545,13 +2596,13 @@ export default function App() {
     processingCommitTimeoutRef.current = window.setTimeout(() => {
       pendingProcessingCommitRef.current = false;
       processingCommitTimeoutRef.current = 0;
-      setLayerState(prev => updateSelectedFilter(prev, layer => {
-        if (layer.filter.type !== 'paintMask') return layer;
+      setLayerState(prev => updateSelectedEffect(prev, layer => {
+        if (layer.effect.type !== 'paintMask') return layer;
         return {
           ...layer,
-          filter: sanitizePaintMaskFilter({
-            ...layer.filter,
-            strokes: [...layer.filter.strokes, stroke].slice(-80),
+          effect: sanitizePaintMaskEffect({
+            ...layer.effect,
+            strokes: [...layer.effect.strokes, stroke].slice(-80),
           }),
         };
       }));
@@ -1559,43 +2610,43 @@ export default function App() {
   };
 
   const beginSmudgeStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!filterSettings || filterSettings.type !== 'smudgeDistortion' || !filterSettings.brushEnabled || event.button !== 0) return;
+    if (!effectSettings || effectSettings.type !== 'smudgeDistortion' || !effectSettings.brushEnabled || event.button !== 0) return;
     event.preventDefault();
     const point = eventToCanvasPoint(event);
     const stroke: SmudgeDistortionStroke = {
       points: [point],
-      brushSize: filterSettings.brushSize,
-      brushStrength: filterSettings.brushStrength,
-      brushFeather: filterSettings.brushFeather,
+      brushSize: effectSettings.brushSize,
+      brushStrength: effectSettings.brushStrength,
+      brushFeather: effectSettings.brushFeather,
     };
     smudgePaintingRef.current = true;
     smudgeStrokeRef.current = stroke;
     lastSmudgePointRef.current = point;
-    syncFilterBrushPreview(point);
+    syncEffectBrushPreview(point);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const beginPaintMaskStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!filterSettings || filterSettings.type !== 'paintMask' || !filterSettings.brushEnabled || event.button !== 0) return;
+    if (!effectSettings || effectSettings.type !== 'paintMask' || !effectSettings.brushEnabled || event.button !== 0) return;
     event.preventDefault();
     const point = eventToCanvasPoint(event);
     const stroke: PaintMaskStroke = {
       points: [point],
-      brush: filterSettings.brush,
-      brushSize: filterSettings.brushSize,
-      brushOpacity: filterSettings.brushOpacity,
-      brushFeather: filterSettings.brushFeather,
+      brush: effectSettings.brush,
+      brushSize: effectSettings.brushSize,
+      brushOpacity: effectSettings.brushOpacity,
+      brushFeather: effectSettings.brushFeather,
     };
     paintMaskPaintingRef.current = true;
     paintMaskStrokeRef.current = stroke;
     lastPaintMaskPointRef.current = point;
-    syncFilterBrushPreview(point);
+    syncEffectBrushPreview(point);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const moveSmudgeStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
     const point = eventToCanvasPoint(event);
-    syncFilterBrushPreview(point);
+    syncEffectBrushPreview(point);
     if (!smudgePaintingRef.current || !smudgeStrokeRef.current) return;
     event.preventDefault();
     const last = lastSmudgePointRef.current;
@@ -1606,7 +2657,7 @@ export default function App() {
 
   const movePaintMaskStroke = (event: ReactPointerEvent<HTMLDivElement>) => {
     const point = eventToCanvasPoint(event);
-    syncFilterBrushPreview(point);
+    syncEffectBrushPreview(point);
     if (!paintMaskPaintingRef.current || !paintMaskStrokeRef.current) return;
     event.preventDefault();
     const last = lastPaintMaskPointRef.current;
@@ -1616,21 +2667,34 @@ export default function App() {
   };
 
   const undoSmudgeStroke = () => {
-    if (!filterSettings || filterSettings.type !== 'smudgeDistortion') return;
-    updateSelectedSmudgeFilterSettings({ strokes: filterSettings.strokes.slice(0, -1) });
+    if (!effectSettings || effectSettings.type !== 'smudgeDistortion') return;
+    updateSelectedSmudgeEffectSettings({ strokes: effectSettings.strokes.slice(0, -1) });
   };
 
   const resetSmudgeStrokes = () => {
-    updateSelectedSmudgeFilterSettings({ strokes: [] });
+    updateSelectedSmudgeEffectSettings({ strokes: [] });
   };
 
   const undoPaintMaskStroke = () => {
-    if (!filterSettings || filterSettings.type !== 'paintMask') return;
-    updateSelectedPaintMaskSettings({ strokes: filterSettings.strokes.slice(0, -1) });
+    if (!effectSettings || effectSettings.type !== 'paintMask') return;
+    updateSelectedPaintMaskSettings({ strokes: effectSettings.strokes.slice(0, -1) });
   };
 
   const resetPaintMaskStrokes = () => {
     updateSelectedPaintMaskSettings({ strokes: [] });
+  };
+
+  const handleDynamicImageFileInput = (event: ReactChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+    void applyDynamicImageFile(file);
+  };
+
+  const handleDynamicImageDrop = (event: ReactDragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files?.[0];
+    if (!file) return;
+    void applyDynamicImageFile(file);
   };
 
   return (
@@ -1658,10 +2722,11 @@ export default function App() {
                     if (handle) requestCompositeDraw();
                   }}
                   settings={layer.settings}
+                  dynamicImageAsset={dynamicImageAssets[layer.id] ?? null}
                   width={canvasWidth}
                   height={canvasHeight}
                   layerId={layer.id}
-                  onFrame={requestCompositeDraw}
+                  onFrame={hasContinuousTextureSource ? requestCompositeDraw : undefined}
                   renderScale={1}
                 />
               </div>
@@ -1678,28 +2743,31 @@ export default function App() {
                 <span className="canvas-loader-ring" />
               </div>
             </div>
-            {isFilterLayerSelected && filterSettings?.brushEnabled ? (
+            {isEffectLayerSelected && effectSettings && (
+              (effectSettings.type === 'smudgeDistortion' || effectSettings.type === 'paintMask')
+              && effectSettings.brushEnabled
+            ) ? (
               <div
                 className="smudge-input-layer"
                 onPointerDown={event => {
-                  if (filterSettings.type === 'paintMask') beginPaintMaskStroke(event);
+                  if (effectSettings.type === 'paintMask') beginPaintMaskStroke(event);
                   else beginSmudgeStroke(event);
                 }}
                 onPointerMove={event => {
-                  if (filterSettings.type === 'paintMask') movePaintMaskStroke(event);
+                  if (effectSettings.type === 'paintMask') movePaintMaskStroke(event);
                   else moveSmudgeStroke(event);
                 }}
                 onPointerUp={event => {
-                  if (filterSettings.type === 'paintMask') commitPaintMaskStroke();
+                  if (effectSettings.type === 'paintMask') commitPaintMaskStroke();
                   else commitSmudgeStroke();
                   event.currentTarget.releasePointerCapture(event.pointerId);
                 }}
                 onPointerCancel={event => {
-                  if (filterSettings.type === 'paintMask') commitPaintMaskStroke();
+                  if (effectSettings.type === 'paintMask') commitPaintMaskStroke();
                   else commitSmudgeStroke();
                   event.currentTarget.releasePointerCapture(event.pointerId);
                 }}
-                onPointerLeave={() => syncFilterBrushPreview(null)}
+                onPointerLeave={() => syncEffectBrushPreview(null)}
               />
             ) : null}
             <div className="smudge-brush-preview" ref={smudgeBrushPreviewRef}>
@@ -1714,9 +2782,9 @@ export default function App() {
 
       <aside className="tool-panel">
         <PanelGroup title="画布">
-          <label className="input-row"><span>宽度</span><input type="text" inputMode="numeric" value={canvasWidthInput} style={{ width: 128 }} onChange={event => setCanvasWidthInput(event.currentTarget.value)} onBlur={() => commitCanvasDimension(canvasWidthInput, canvasWidth, setCanvasWidth, setCanvasWidthInput)} /></label>
-          <label className="input-row"><span>高度</span><input type="text" inputMode="numeric" value={canvasHeightInput} style={{ width: 128 }} onChange={event => setCanvasHeightInput(event.currentTarget.value)} onBlur={() => commitCanvasDimension(canvasHeightInput, canvasHeight, setCanvasHeight, setCanvasHeightInput)} /></label>
-          <div className="input-row"><span>预览颜色</span><ColorInput value={previewColor} onChange={setPreviewColor} ariaLabel="编辑画布预览颜色" /></div>
+          <label className="input-row"><span>宽度</span><input className="panel-number-input" type="text" inputMode="numeric" value={canvasWidthInput} onChange={event => setCanvasWidthInput(event.currentTarget.value)} onBlur={() => commitCanvasDimension(canvasWidthInput, canvasWidth, setCanvasWidth, setCanvasWidthInput)} /></label>
+          <label className="input-row"><span>高度</span><input className="panel-number-input" type="text" inputMode="numeric" value={canvasHeightInput} onChange={event => setCanvasHeightInput(event.currentTarget.value)} onBlur={() => commitCanvasDimension(canvasHeightInput, canvasHeight, setCanvasHeight, setCanvasHeightInput)} /></label>
+          <div className="input-row"><span>背景色</span><ColorInput value={previewColor} onChange={setPreviewColor} ariaLabel="编辑画布背景色" /></div>
           <button type="button" className="wide-button" onClick={exportCurrentImage}>导出图片</button>
         </PanelGroup>
 
@@ -1726,10 +2794,9 @@ export default function App() {
             <button type="button" className="save-button" disabled={!selectedPreset || !hasUnsavedChanges} onClick={saveCurrentPreset}>保存</button>
           </div>
           <select
-            value={selectedId || ''}
+            value={selectedId ?? presets[0]?.id ?? ''}
             onChange={event => handlePresetChange(event.currentTarget.value)}
           >
-            <option value="">自定义</option>
             {presets.map(preset => (
               <option key={preset.id} value={preset.id}>
                 {preset.name}{selectedId === preset.id && hasUnsavedChanges ? '*' : ''}
@@ -1739,19 +2806,19 @@ export default function App() {
           <div className="button-row preset-manage-row">
             <button type="button" className="wide-button" disabled={!selectedId} onClick={renamePreset}>重命名</button>
             <button type="button" className="wide-button" disabled={!selectedPreset || !hasUnsavedChanges} onClick={resetPreset}>重置</button>
-            <button type="button" className="danger-button" disabled={!selectedId} onClick={deletePreset}>删除</button>
+            <button type="button" className="danger-button" disabled={!selectedId || presets.length <= 1} onClick={deletePreset}>删除</button>
           </div>
         </PanelGroup>
 
         <PanelGroup title="纹理层">
           <div className="layer-add-row">
             <button type="button" className="add-layer-button" onClick={addLayer}>新建图层 +</button>
-            <button type="button" className="add-layer-button" onClick={addFilterLayer}>新建滤镜 +</button>
+            <button type="button" className="add-layer-button" onClick={addEffectLayer}>新建效果 +</button>
           </div>
           <div className="texture-layer-list">
             {displayedLayers.map(layer => (
               <div
-                className={`texture-layer-row ${layer.kind === 'filter' ? 'filter-layer-row' : ''} ${layer.visible === false ? 'hidden-layer' : ''} ${layer.id === layerState.selectedLayerId ? 'active' : ''} ${layer.id === draggingLayerId ? 'dragging' : ''}`}
+                className={`texture-layer-row ${layer.kind === 'effect' ? 'effect-layer-row' : ''} ${layer.visible === false ? 'hidden-layer' : ''} ${layer.id === layerState.selectedLayerId ? 'active' : ''} ${layer.id === draggingLayerId ? 'dragging' : ''}`}
                 key={layer.id}
                 ref={node => { layerRowRefs.current[layer.id] = node; }}
                 onClick={() => setLayerState(prev => ({ ...prev, selectedLayerId: layer.id }))}
@@ -1766,10 +2833,10 @@ export default function App() {
                   ⋮⋮
                 </button>
                 <input
-                  aria-label={layer.kind === 'filter' ? '滤镜名称' : '图层名称'}
+                  aria-label={layer.kind === 'effect' ? '效果名称' : '图层名称'}
                   value={layer.name}
                   onChange={event => {
-                    if (layer.kind === 'filter') updateFilterLayer(layer.id, { name: event.currentTarget.value });
+                    if (layer.kind === 'effect') updateEffectLayer(layer.id, { name: event.currentTarget.value });
                     else updateLayer(layer.id, { name: event.currentTarget.value });
                   }}
                   onClick={event => event.stopPropagation()}
@@ -1797,7 +2864,7 @@ export default function App() {
                   aria-pressed={layer.visible !== false}
                   onClick={event => {
                     event.stopPropagation();
-                    if (layer.kind === 'filter') updateFilterLayer(layer.id, { visible: layer.visible === false });
+                    if (layer.kind === 'effect') updateEffectLayer(layer.id, { visible: layer.visible === false });
                     else updateLayer(layer.id, { visible: layer.visible === false });
                   }}
                 >
@@ -1822,7 +2889,7 @@ export default function App() {
 
         <PanelGroup title={selectedLayer?.name?.trim() || '图层类型'}>
           {isTextureLayerSelected ? <label className="input-row selected-layer-type-row">
-            <span>纹理类型</span>
+            <span>图层类型</span>
             <select
               value={settings.textureType}
               onChange={event => {
@@ -1832,42 +2899,146 @@ export default function App() {
             >
               <option value="halftone">半调点阵</option>
               <option value="gradient">渐变背景</option>
+              <option value="dynamicImage">图像</option>
             </select>
           </label> : null}
-          {isFilterLayerSelected && filterSettings ? <label className="input-row selected-layer-type-row">
-            <span>滤镜类型</span>
-            <select value={filterSettings.type} onChange={event => changeSelectedFilterType(event.currentTarget.value as TextureFilter['type'])}>
-              <option value="smudgeDistortion">涂抹畸变</option>
+          {isEffectLayerSelected && effectSettings ? <label className="input-row selected-layer-type-row">
+            <span>效果类型</span>
+            <select value={toEffectTypeSelectValue(effectSettings)} onChange={event => changeSelectedEffectType(event.currentTarget.value)}>
               <option value="paintMask">绘制蒙版</option>
+              {DYNAMIC_IMAGE_ALGORITHM_GROUPS.map(group => {
+                const staticOptions = group.group === '风格化'
+                  ? [
+                    { value: 'pixelGrain', label: '像素颗粒' },
+                    { value: 'outlines', label: '轮廓线' },
+                  ]
+                  : [];
+                const dynamicOptions = group.group === '形变'
+                  ? [
+                    ...(group.items[0] ? [group.items[0]] : []),
+                    null,
+                    ...group.items.slice(1),
+                  ]
+                  : group.items;
+
+                return (
+                  <optgroup key={group.group} label={group.group}>
+                    {dynamicOptions.map(item => (
+                      item
+                        ? <option key={item.id} value={`${DYNAMIC_IMAGE_EFFECT_TYPE_PREFIX}${item.id}`}>{item.label}</option>
+                        : <option key="smudgeDistortion" value="smudgeDistortion">涂抹畸变</option>
+                    ))}
+                    {staticOptions.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </optgroup>
+                );
+              })}
             </select>
           </label> : null}
         </PanelGroup>
 
         {isTextureLayerSelected ? <>
 
-        <PanelGroup title="动画参数">
+        {isGradientTexture ? <PanelGroup title="渐变色">
+            <GradientStopsEditor stops={settings.gradientStops} onChange={gradientStops => updateSettings({ gradientStops })} />
+            {isGradientAlgorithm(settings.gradientAnimType) ? null : range('gradientAngle', '渐变方向', 0, 360, 1, value => `${Math.round(value)}°`)}
+        </PanelGroup> : null}
+
+        {isDynamicImageTexture ? <PanelGroup title="图像源">
+          <input
+            ref={dynamicImageInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            className="dynamic-image-file-input"
+            onChange={handleDynamicImageFileInput}
+          />
+          {selectedDynamicImageAsset ? (
+            <div className="dynamic-image-uploaded">
+              <img src={selectedDynamicImageAsset.objectUrl} alt={selectedDynamicImageAsset.name} />
+              <div className="dynamic-image-meta">
+                <strong>{selectedDynamicImageAsset.name}</strong>
+                <span>{selectedDynamicImageAsset.width} × {selectedDynamicImageAsset.height}</span>
+                <span>{formatFileSize(selectedDynamicImageAsset.fileSize)}</span>
+              </div>
+              <div className="button-row">
+                <button
+                  type="button"
+                  className="wide-button"
+                  disabled={isDynamicImageUploading}
+                  onClick={() => dynamicImageInputRef.current?.click()}
+                >
+                  {isDynamicImageUploading ? '处理中...' : '替换图像'}
+                </button>
+                <button type="button" className="wide-button" onClick={removeSelectedDynamicImage}>移除</button>
+              </div>
+            </div>
+          ) : (
+            <label
+              className={`dynamic-image-upload-dropzone${isDynamicImageUploading ? ' is-loading' : ''}`}
+              onDragOver={event => event.preventDefault()}
+              onDrop={handleDynamicImageDrop}
+            >
+              <strong>{isDynamicImageUploading ? '正在处理图像...' : '上传图像'}</strong>
+              <span>从图像生成动态背景</span>
+              <button
+                type="button"
+                className="mini-button"
+                disabled={isDynamicImageUploading}
+                onClick={() => dynamicImageInputRef.current?.click()}
+              >
+                选择文件
+              </button>
+            </label>
+          )}
+          {dynamicImageUploadError ? <p className="dynamic-image-upload-error">{dynamicImageUploadError}</p> : null}
+          {!selectedDynamicImageAsset && settings.dynamicImageAssetId ? (
+            <p className="dynamic-image-upload-hint">该图层已有历史图像参数，当前会话需重新上传原图。</p>
+          ) : null}
+          <label className="input-row">
+            <span>填充方式</span>
+            <select value={settings.dynamicImageFit} onChange={event => updateSettings({ dynamicImageFit: event.currentTarget.value as TextureSettings['dynamicImageFit'] })}>
+              <option value="cover">覆盖裁切（cover）</option>
+              <option value="contain">完整显示（contain）</option>
+            </select>
+          </label>
+        </PanelGroup> : null}
+
+        {isDynamicImageTexture ? null : <PanelGroup title={isGradientTexture ? '渐变算法' : '动画参数'}>
           <label className="check-row"><span>启用动画</span><input type="checkbox" checked={settings.animEnabled !== false} onChange={event => updateSettings({ animEnabled: event.currentTarget.checked })} /></label>
           {isHalftoneTexture ? <>
             <label className="input-row"><span>动画类型</span><select value={settings.animType} onChange={event => updateSettings({ animType: event.currentTarget.value as TextureAnimType })}><option value="drift">方向位移</option><option value="breathe">呼吸</option><option value="vortex">漩涡</option><option value="wave">波动</option><option value="float">漂浮</option></select></label>
             {range('speed', '动画速度', 1, 10, 0.01, value => value.toFixed(2))}
             {(settings.animType === 'drift' || settings.animType === 'wave') ? range('directionDeg', '流动方向', 0, 360, 1, value => `${Math.round(value)}°`) : null}
             {(settings.animType === 'drift' || settings.animType === 'vortex') ? range('coherence', '连贯性', 0, 2, 0.01, value => `${value.toFixed(2)} s`) : null}
-          </> : <>
-            <label className="input-row"><span>动画类型</span><select value={settings.gradientAnimType} onChange={event => {
+          </> : isGradientTexture ? <>
+            <label className="input-row"><span>渐变算法</span><select value={currentGradientAlgorithm.id} onChange={event => {
               const next = event.currentTarget.value as TextureGradientAnimType;
-              updateSettings({ gradientAnimType: next, gradientStops: next !== 'none' && isGrayscaleStops(settings.gradientStops) ? FLOW_DEFAULT_STOPS : settings.gradientStops });
-            }}><option value="none">无（静态）</option><option value="flow">流动渐变</option></select></label>
-            {settings.gradientAnimType === 'flow' ? <>
-              {range('gradientAnimSpeed', '流动速度', 0.01, 1, 0.01, value => value.toFixed(2))}
-              {range('gradientFlowScaleX', '纹理缩放 X', 0.01, 1, 0.01, value => value.toFixed(2))}
-              {range('gradientFlowScaleY', '纹理缩放 Y', 0.01, 1, 0.01, value => value.toFixed(2))}
-              {range('gradientFlowRotation', '旋转纹理', 0, 360, 1, value => `${Math.round(value)}°`)}
-              {range('gradientFlowComplexity', '复杂度', 1, 6, 1, value => `${Math.round(value)}`)}
-              {range('gradientFlowWarp', '扭曲强度', 0, 6, 0.1, value => value.toFixed(1))}
-              {range('gradientFlowSoftness', '柔和度', 0, 1, 0.01, value => value.toFixed(2))}
-            </> : null}
-          </>}
-        </PanelGroup>
+              const algorithm = getGradientAlgorithmDef(next);
+              updateSettings({
+                gradientAnimType: algorithm.id,
+                ...algorithm.defaults,
+                gradientStops: isGrayscaleStops(settings.gradientStops) ? FLOW_DEFAULT_STOPS : settings.gradientStops,
+              });
+            }}>
+              {GRADIENT_ALGORITHM_GROUPS.map(group => (
+                <optgroup label={group.group} key={group.group}>
+                  {group.items.map(item => <option value={item.id} key={item.id}>{item.label}</option>)}
+                </optgroup>
+              ))}
+            </select></label>
+            <>
+              {currentGradientAlgorithm.params.map(param => range(
+                param.key,
+                param.label,
+                param.min,
+                param.max,
+                param.step,
+                value => `${param.digits === undefined ? value : param.digits === 0 ? Math.round(value) : value.toFixed(param.digits)}${param.suffix ?? ''}`,
+              ))}
+            </>
+          </> : null}
+        </PanelGroup>}
 
         {isHalftoneTexture ? <PanelGroup title="斑纹参数">
           <label className="input-row"><span>斑纹类型</span><select value={settings.spotType} onChange={event => updateSettings({ spotType: event.currentTarget.value as TextureSpotType })}><option value="gaussian">高斯</option><option value="wave">波纹</option><option value="cellular">细胞</option><option value="ripple">涟漪</option><option value="streak">条纹</option></select></label>
@@ -1878,9 +3049,6 @@ export default function App() {
           <div className="input-row"><span>斑纹颜色</span><ColorInput value={settings.dotColor} onChange={dotColor => updateSettings({ dotColor })} ariaLabel="编辑斑纹颜色" /></div>
           {range('dotOpacity', '斑纹透明度', 0, 1, 0.01, value => value.toFixed(2))}
           {range('seed', '随机种子', 1, 9999, 1, value => `${Math.round(value)}`)}
-          {range('spotScale', '整体缩放', 0.1, 10, 0.1, value => value.toFixed(1))}
-          {range('spotOffsetX', 'X轴偏移', -400, 400, 1, value => `${Math.round(value)} px`)}
-          {range('spotOffsetY', 'Y轴偏移', -400, 400, 1, value => `${Math.round(value)} px`)}
           {range('contrast', '对比度', 0.2, 3, 0.01, value => value.toFixed(2))}
           {range('threshold', '显隐阈值', 0, 1, 0.01, value => value.toFixed(2))}
         </PanelGroup> : null}
@@ -1941,52 +3109,146 @@ export default function App() {
           </> : null}
         </PanelGroup> : null}
 
-        {isGradientTexture ? <PanelGroup title="渐变背景">
-            <GradientStopsEditor stops={settings.gradientStops} onChange={gradientStops => updateSettings({ gradientStops })} />
-            {settings.gradientAnimType === 'flow' ? null : range('gradientAngle', '渐变方向', 0, 360, 1, value => `${Math.round(value)}°`)}
-            {range('gradientFadeEdgeTop', '上边缘渐隐', 0, 2, 0.01, value => value.toFixed(2))}
-            {range('gradientFadeEdgeBottom', '下边缘渐隐', 0, 2, 0.01, value => value.toFixed(2))}
-            {range('gradientFadeEdgeLeft', '左边缘渐隐', 0, 2, 0.01, value => value.toFixed(2))}
-            {range('gradientFadeEdgeRight', '右边缘渐隐', 0, 2, 0.01, value => value.toFixed(2))}
+        {isTextureLayerSelected ? <PanelGroup
+          title="变换参数"
+          headerActions={(
+            <button
+              type="button"
+              className="group-title-action-button"
+              disabled={isTextureTransformDefault}
+              onClick={() => updateTextureTransform(textureDefaultTransform)}
+            >
+              恢复默认值
+            </button>
+          )}
+        >
+          {transformRange(textureTransform, updateTextureTransform, 'scale', value => value.toFixed(2), textureTransformParamDefs, textureTransformBounds)}
+          {transformRange(textureTransform, updateTextureTransform, 'aspectRatio', value => value.toFixed(2), textureTransformParamDefs, textureTransformBounds)}
+          {transformRange(textureTransform, updateTextureTransform, 'offsetX', value => `${Math.round(value)} px`, textureTransformParamDefs, textureTransformBounds)}
+          {transformRange(textureTransform, updateTextureTransform, 'offsetY', value => `${Math.round(value)} px`, textureTransformParamDefs, textureTransformBounds)}
         </PanelGroup> : null}
 
-        <button type="button" className="wide-button reset" onClick={() => replaceSettings(currentTextureDefaults)}>恢复纹理默认参数</button>
         </> : null}
 
-        {isFilterLayerSelected && filterSettings ? <>
-          {filterSettings.type === 'smudgeDistortion' ? <>
+        {isEffectLayerSelected && effectSettings ? <>
+          {effectSettings.type === 'smudgeDistortion' ? <>
             <PanelGroup title="绘制">
-              <label className="check-row"><span>启用画笔</span><input type="checkbox" checked={filterSettings.brushEnabled} onChange={event => updateSelectedSmudgeFilterSettings({ brushEnabled: event.currentTarget.checked })} /></label>
-              {filterRange('brushSize', '画笔大小', 4, 400, 1, value => `${Math.round(value)} px`)}
-              {filterRange('brushStrength', '画笔强度', 0, 1, 0.01, value => value.toFixed(2))}
-              {filterRange('brushFeather', '画笔柔和度', 0, 400, 1, value => `${Math.round(value)} px`)}
+              <label className="check-row"><span>启用画笔</span><input type="checkbox" checked={effectSettings.brushEnabled} onChange={event => updateSelectedSmudgeEffectSettings({ brushEnabled: event.currentTarget.checked })} /></label>
+              {effectRange('brushSize', '画笔大小', 4, 400, 1, value => `${Math.round(value)} px`)}
+              {effectRange('brushStrength', '画笔强度', 0, 1, 0.01, value => value.toFixed(2))}
+              {effectRange('brushFeather', '画笔柔和度', 0, 400, 1, value => `${Math.round(value)} px`)}
               <div className="button-row">
-                <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={undoSmudgeStroke}>撤销</button>
-                <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={resetSmudgeStrokes}>重置</button>
+                <button type="button" className="wide-button" disabled={effectSettings.strokes.length <= 0} onClick={undoSmudgeStroke}>撤销</button>
+                <button type="button" className="wide-button" disabled={effectSettings.strokes.length <= 0} onClick={resetSmudgeStrokes}>重置</button>
               </div>
             </PanelGroup>
-            <PanelGroup title="滤镜参数">
-              <label className="check-row"><span>启用滤镜</span><input type="checkbox" checked={filterSettings.enabled} onChange={event => updateSelectedSmudgeFilterSettings({ enabled: event.currentTarget.checked })} /></label>
-              {filterRange('strength', '滤镜强度', 0, 1, 0.01, value => value.toFixed(2))}
-              {filterRange('precision', '精度', 1, 4, 1, value => `${Math.round(value)}x`)}
+            <PanelGroup title="效果参数">
+              {effectRange('strength', '效果强度', 0, 1, 0.01, value => value.toFixed(2))}
+              {effectRange('precision', '精度', 1, 4, 1, value => `${Math.round(value)}x`)}
             </PanelGroup>
           </> : null}
-          {filterSettings.type === 'paintMask' ? <>
+          {effectSettings.type === 'paintMask' ? <>
             <PanelGroup title="绘制">
-              <label className="check-row"><span>启用画笔</span><input type="checkbox" checked={filterSettings.brushEnabled} onChange={event => updateSelectedPaintMaskSettings({ brushEnabled: event.currentTarget.checked })} /></label>
-              <label className="input-row"><span>蒙版画笔</span><select value={filterSettings.brush} onChange={event => updateSelectedPaintMaskSettings({ brush: event.currentTarget.value as TextureMaskBrush })}><option value="black">黑色：隐藏内容</option><option value="white">白色：恢复显示</option></select></label>
+              <label className="check-row"><span>启用画笔</span><input type="checkbox" checked={effectSettings.brushEnabled} onChange={event => updateSelectedPaintMaskSettings({ brushEnabled: event.currentTarget.checked })} /></label>
+              <label className="input-row"><span>蒙版画笔</span><select value={effectSettings.brush} onChange={event => updateSelectedPaintMaskSettings({ brush: event.currentTarget.value as TextureMaskBrush })}><option value="black">黑色：隐藏内容</option><option value="white">白色：恢复显示</option></select></label>
               {paintMaskRange('brushSize', '画笔大小', 4, 400, 1, value => `${Math.round(value)} px`)}
               {paintMaskRange('brushOpacity', '透明度', 0, 1, 0.01, value => value.toFixed(2))}
               {paintMaskRange('brushFeather', '羽化大小', 0, 400, 1, value => `${Math.round(value)} px`)}
               <div className="button-row">
-                <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={undoPaintMaskStroke}>撤销</button>
-                <button type="button" className="wide-button" disabled={filterSettings.strokes.length <= 0} onClick={resetPaintMaskStrokes}>重置蒙版</button>
+                <button type="button" className="wide-button" disabled={effectSettings.strokes.length <= 0} onClick={undoPaintMaskStroke}>撤销</button>
+                <button type="button" className="wide-button" disabled={effectSettings.strokes.length <= 0} onClick={resetPaintMaskStrokes}>重置蒙版</button>
               </div>
             </PanelGroup>
-            <PanelGroup title="滤镜参数">
-              <label className="check-row"><span>启用滤镜</span><input type="checkbox" checked={filterSettings.enabled} onChange={event => updateSelectedPaintMaskSettings({ enabled: event.currentTarget.checked })} /></label>
+          </> : null}
+          {effectSettings.type === 'pixelGrain' ? <>
+            <PanelGroup title="效果参数">
+              {pixelGrainRange('amount', '像素颗粒', 0, 1, 0.01, value => `${Math.round(value * 100)}`, raw => {
+                const parsed = parseLooseNumber(raw);
+                if (parsed === null) return null;
+                return parsed / 100;
+              })}
+              <label className="input-row">
+                <span>混合模式</span>
+                <select
+                  value={effectSettings.blendMode}
+                  onChange={event => updateSelectedPixelGrainSettings({ blendMode: event.currentTarget.value as PixelGrainBlendMode })}
+                >
+                  {PIXEL_GRAIN_BLEND_OPTIONS.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
             </PanelGroup>
           </> : null}
+          {effectSettings.type === 'outlines' ? <>
+            <PanelGroup title="轮廓参数">
+              <label className="input-row">
+                <span>识别依据</span>
+                <select
+                  value={effectSettings.inputMode}
+                  onChange={event => updateSelectedOutlinesSettings({ inputMode: event.currentTarget.value as OutlinesInputMode })}
+                >
+                  <option value="luma">亮度</option>
+                  <option value="inverseLuma">反向亮度</option>
+                  <option value="alpha">透明度</option>
+                </select>
+              </label>
+              {outlinesRange('threshold', '明暗阈值', 0.05, 0.95, 0.01, value => `${Math.round(value * 100)}%`)}
+              {outlinesRange('count', '轮廓数量', 2, 24, 1, value => `${Math.round(value)}`)}
+              {outlinesRange('thickness', '线条粗细', 0.5, 4, 0.05, value => `${value.toFixed(2)} px`)}
+              {outlinesRange('spacing', '轮廓间距', 0.5, 4, 0.05, value => value.toFixed(2))}
+              {outlinesRange('softness', '线条柔边', 0, 1, 0.01, value => `${Math.round(value * 100)}%`)}
+              {outlinesRange('smoothing', '轮廓平滑', 0, 5, 0.01, value => `${Math.round(value * 13)} px`)}
+              {outlinesRange('gaussianSamples', '平滑质量', 3, 9, 2, value => ({ 3: '快速', 5: '标准', 7: '均衡', 9: '精细' }[Math.round(value)] ?? '均衡'))}
+              {outlinesRange('offset', '位置偏移', -0.5, 0.5, 0.01, value => `${Math.round(value * 100)}%`)}
+              <label className="check-row"><span>启用动画</span><input type="checkbox" checked={effectSettings.animationEnabled} onChange={event => updateSelectedOutlinesSettings({ animationEnabled: event.currentTarget.checked })} /></label>
+              {effectSettings.animationEnabled ? outlinesRange('speed', '流动速度', 0, 1.5, 0.01, value => value.toFixed(2)) : null}
+            </PanelGroup>
+            <PanelGroup title="线条渐变色">
+              <GradientStopsEditor
+                stops={effectSettings.lineGradientStops}
+                onChange={lineGradientStops => updateSelectedOutlinesSettings({ lineGradientStops })}
+              />
+            </PanelGroup>
+          </> : null}
+          {effectSettings.type === 'dynamicImageEffect' ? <>
+            <PanelGroup title="效果参数">
+              {currentDynamicImageEffectAlgorithm.params.map(param => dynamicImageEffectRange(
+                param.key === 'dynamicImageSpeed'
+                  ? 'speed'
+                  : param.key === 'dynamicImageStrength'
+                    ? 'strength'
+                    : param.key === 'dynamicImageParamA'
+                      ? 'paramA'
+                      : param.key === 'dynamicImageParamB'
+                        ? 'paramB'
+                        : 'opacity',
+                param.label,
+                param.min,
+                param.max,
+                param.step,
+                value => `${param.digits === undefined ? value : param.digits === 0 ? Math.round(value) : value.toFixed(param.digits)}${param.suffix ?? ''}`,
+              ))}
+            </PanelGroup>
+          </> : null}
+          {effectTransformEnabled ? <PanelGroup
+            title="变换参数"
+            headerActions={(
+              <button
+                type="button"
+                className="group-title-action-button"
+                disabled={isEffectTransformDefault}
+                onClick={() => updateEffectTransform(TRANSFORM_PARAMS_DEFAULTS)}
+              >
+                恢复默认值
+              </button>
+            )}
+          >
+            {transformRange(effectTransform, updateEffectTransform, 'scale', value => value.toFixed(2), TRANSFORM_PARAM_DEFS, TRANSFORM_PARAM_BOUNDS_DEFAULT)}
+            {transformRange(effectTransform, updateEffectTransform, 'aspectRatio', value => value.toFixed(2), TRANSFORM_PARAM_DEFS, TRANSFORM_PARAM_BOUNDS_DEFAULT)}
+            {transformRange(effectTransform, updateEffectTransform, 'offsetX', value => `${Math.round(value)} px`, TRANSFORM_PARAM_DEFS, TRANSFORM_PARAM_BOUNDS_DEFAULT)}
+            {transformRange(effectTransform, updateEffectTransform, 'offsetY', value => `${Math.round(value)} px`, TRANSFORM_PARAM_DEFS, TRANSFORM_PARAM_BOUNDS_DEFAULT)}
+          </PanelGroup> : null}
         </> : null}
       </aside>
     </main>

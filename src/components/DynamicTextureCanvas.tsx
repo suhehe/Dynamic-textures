@@ -1,6 +1,18 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
-import type { TextureSettings, TextureSpotType, TextureAnimType, TextureActivationType } from '../texture';
+import {
+  GRADIENT_ALGO_TRANSFORM_PARAM_BOUNDS,
+  TRANSFORM_PARAM_BOUNDS_DEFAULT,
+  clampTransformParamsToSize,
+  isGradientAlgorithm,
+  type TextureSettings,
+  type TextureSpotType,
+  type TextureAnimType,
+  type TextureActivationType,
+  type TextureGradientAlgorithm,
+  type TransformParams,
+} from '../texture';
 import { renderHalftoneWebGL } from '../halftoneWebGL';
+import type { DynamicImageAsset } from '../dynamicImage';
 
 function clamp01(value: number) {
   return Math.min(1, Math.max(0, value));
@@ -175,6 +187,30 @@ function drawCharacter(
 // 原理：多重 simplex 噪声 (FBM) + 域扭曲 (domain warping)，将扭曲后的噪声场
 // 映射到用户配置的渐变色带，产生平滑流动的有机渐变（参考 gradientora 背景动画）。
 const FLOW_MAX_STOPS = 8;
+const GRADIENT_ALGORITHM_UNIFORM_INDEX: Record<TextureGradientAlgorithm, number> = {
+  flow: 0,
+  turbulence: 1,
+  curl: 2,
+  wave: 3,
+  polarWave: 4,
+  voronoi: 5,
+  metaballs: 6,
+  liquidSDF: 7,
+  vortex: 8,
+};
+const warnedMissingGradientAlgoUniform = new Set<string>();
+function getGradientAlgorithmUniformIndex(algorithm: TextureGradientAlgorithm) {
+  const uniformIndex = GRADIENT_ALGORITHM_UNIFORM_INDEX[algorithm];
+  if (typeof uniformIndex === 'number') return uniformIndex;
+  if (!warnedMissingGradientAlgoUniform.has(algorithm)) {
+    warnedMissingGradientAlgoUniform.add(algorithm);
+    console.warn(
+      `[DynamicTextureCanvas] Missing gradient shader mapping for algorithm "${algorithm}". `
+      + 'Fallback to "flow" (u_algo=0). Please update GRADIENT_ALGORITHM_UNIFORM_INDEX.',
+    );
+  }
+  return GRADIENT_ALGORITHM_UNIFORM_INDEX.flow;
+}
 const FLOW_VERT_SRC = `
 attribute vec2 a_pos;
 varying vec2 v_uv;
@@ -188,15 +224,20 @@ varying vec2 v_uv;
 uniform float u_time;
 uniform float u_scaleX;
 uniform float u_scaleY;
+uniform vec2 u_offset;
 uniform float u_rotation;
 uniform float u_warp;
 uniform float u_soft;
 uniform float u_aspect;
 uniform int u_octaves;
+uniform int u_algo;
+uniform float u_paramA;
+uniform float u_paramB;
 uniform vec3 u_col[${FLOW_MAX_STOPS}];
 uniform float u_pos[${FLOW_MAX_STOPS}];
 uniform float u_alpha[${FLOW_MAX_STOPS}];
 uniform int u_count;
+const float PI = 3.141592653589793;
 
 vec3 mod289(vec3 x){ return x - floor(x * (1.0 / 289.0)) * 289.0; }
 vec2 mod289(vec2 x){ return x - floor(x * (1.0 / 289.0)) * 289.0; }
@@ -237,6 +278,19 @@ float fbm(vec2 p, int oct){
   }
   return s / max(0.0001, norm);
 }
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+vec2 hash22(vec2 p) {
+  float n = hash12(p);
+  return fract(vec2(n, n + hash12(p + 19.19)) * vec2(437.17, 219.53));
+}
+float smin(float a, float b, float k) {
+  float h = clamp(0.5 + 0.5 * (b - a) / max(0.0001, k), 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
 // 沿色标位置插值的渐变带；用 smoothstep 缓动让相邻颜色衔接更柔和
 vec4 ramp(float t){
   t = clamp(t, 0.0, 1.0);
@@ -253,16 +307,7 @@ vec4 ramp(float t){
   }
   return vec4(c, al);
 }
-void main(){
-  vec2 centered = v_uv - 0.5;
-  float cosR = cos(u_rotation);
-  float sinR = sin(u_rotation);
-  vec2 rotated = vec2(centered.x * cosR - centered.y * sinR, centered.x * sinR + centered.y * cosR);
-  vec2 p = (rotated + 0.5) * vec2(u_scaleX, u_scaleY);
-  float t = u_time;
-  int oct = u_octaves;
-
-  // 双重域扭曲：把噪声场反复折叠，得到连贯流动的有机条带（参考 gradientora 背景）
+float fieldFlow(vec2 p, float t, int oct) {
   vec2 q = vec2(
     fbm(p + vec2(0.0, 0.0) + 0.06 * t, oct),
     fbm(p + vec2(4.7, 2.3) - 0.05 * t, oct)
@@ -271,8 +316,176 @@ void main(){
     fbm(p + u_warp * q + vec2(1.7, 9.2) + 0.10 * t, oct),
     fbm(p + u_warp * q + vec2(8.3, 2.8) - 0.08 * t, oct)
   );
-  float f = fbm(p + u_warp * r, oct);
-  f = 0.5 + 0.5 * f;
+  return 0.5 + 0.5 * fbm(p + u_warp * r, oct);
+}
+float fieldTurbulence(vec2 p, float t, int oct) {
+  vec2 drift = vec2(0.08 * t, -0.05 * t);
+  float n = abs(fbm(p + drift, oct));
+  float ridged = 1.0 - abs(2.0 * n - 1.0);
+  float veins = pow(clamp(ridged, 0.0, 1.0), mix(0.7, 4.0, clamp(u_paramA, 0.0, 1.0)));
+  float base = 0.5 + 0.5 * fbm(p * 0.55 - drift.yx + u_warp * veins, oct);
+  return mix(base, veins, 0.65);
+}
+float fieldCurl(vec2 p, float t, int oct) {
+  vec2 pos = p + vec2(0.04 * t, -0.03 * t);
+  float eps = mix(0.01, 0.08, clamp(u_paramA, 0.0, 1.0));
+  for (int i = 0; i < 4; i++) {
+    float nx1 = fbm(pos + vec2(eps, 0.0), oct);
+    float nx0 = fbm(pos - vec2(eps, 0.0), oct);
+    float ny1 = fbm(pos + vec2(0.0, eps), oct);
+    float ny0 = fbm(pos - vec2(0.0, eps), oct);
+    vec2 curl = normalize(vec2(ny1 - ny0, -(nx1 - nx0)) + 0.0001);
+    pos += curl * u_warp * 0.12;
+  }
+  return 0.5 + 0.5 * fbm(pos + vec2(0.06 * t, 0.03 * t), oct);
+}
+float fieldWave(vec2 p, float t) {
+  int waveCount = int(clamp(floor(u_paramA + 0.5), 2.0, 8.0));
+  float sum = 0.0;
+  float norm = 0.0;
+  for (int i = 0; i < 8; i++) {
+    if (i < waveCount) {
+      float fi = float(i);
+      float a = fi * 1.618 + u_paramB * PI;
+      vec2 dir = vec2(cos(a), sin(a));
+      float freq = 4.0 + fi * 1.7 + u_warp;
+      sum += sin(dot(p, dir) * freq + t * (0.7 + fi * 0.13)) / (1.0 + fi * 0.18);
+      norm += 1.0 / (1.0 + fi * 0.18);
+    }
+  }
+  return 0.5 + 0.5 * sum / max(0.0001, norm);
+}
+float fieldPolarWave(vec2 p, float t) {
+  vec2 c = p - 0.5;
+  c.x *= u_aspect;
+  float r = length(c);
+  float a = atan(c.y, c.x);
+  float density = clamp(u_paramA, 2.0, 16.0);
+  float spiral = u_paramB * 8.0;
+  float rings = sin(r * density * PI + a * spiral + t);
+  float spokes = sin(a * (3.0 + u_warp) + r * 12.0 - t * 0.7);
+  float noise = fbm(c * (2.0 + u_warp) + 0.04 * t, u_octaves);
+  return 0.5 + 0.5 * (rings * 0.62 + spokes * 0.24 + noise * 0.34);
+}
+float fieldVoronoi(vec2 p, float t, int oct) {
+  float density = clamp(u_paramA, 2.0, 12.0);
+  vec2 warped = p * density + u_warp * 0.18 * vec2(
+    fbm(p + 0.05 * t, oct),
+    fbm(p + vec2(4.1, 7.3) - 0.04 * t, oct)
+  );
+  vec2 cell = floor(warped);
+  vec2 local = fract(warped);
+  float minD = 10.0;
+  float secondD = 10.0;
+  for (int y = -1; y <= 1; y++) {
+    for (int x = -1; x <= 1; x++) {
+      vec2 offset = vec2(float(x), float(y));
+      vec2 point = hash22(cell + offset);
+      point = 0.5 + 0.5 * sin(t * 0.25 + 6.2831 * point);
+      float d = length(offset + point - local);
+      if (d < minD) {
+        secondD = minD;
+        minD = d;
+      } else if (d < secondD) {
+        secondD = d;
+      }
+    }
+  }
+  float edge = clamp((secondD - minD) / max(0.001, u_paramB + 0.05), 0.0, 1.0);
+  float fill = 1.0 - smoothstep(0.0, 1.0, minD);
+  return mix(fill, edge, 0.55);
+}
+float fieldMetaballs(vec2 p, float t) {
+  int ballCount = int(clamp(floor(u_paramA + 0.5), 2.0, 10.0));
+  float radius = clamp(u_paramB, 0.08, 0.8);
+  float field = 0.0;
+  for (int i = 0; i < 10; i++) {
+    if (i < ballCount) {
+      float fi = float(i);
+      vec2 seed = hash22(vec2(fi, fi * 7.13));
+      vec2 center = 0.5 + 0.36 * vec2(
+        sin(t * (0.18 + seed.x * 0.22) + fi * 2.11),
+        cos(t * (0.15 + seed.y * 0.25) + fi * 1.73)
+      );
+      vec2 d = (p - center) * vec2(u_aspect, 1.0);
+      field += radius * radius / max(0.001, dot(d, d));
+    }
+  }
+  float blob = 1.0 - exp(-field * (0.22 + u_warp * 0.08));
+  return clamp(blob, 0.0, 1.0);
+}
+vec4 colorLiquidSDF(vec2 uv, float t) {
+  vec2 centered = uv - 0.5 - u_offset;
+  float cosR = cos(u_rotation);
+  float sinR = sin(u_rotation);
+  vec2 rotated = vec2(centered.x * cosR - centered.y * sinR, centered.x * sinR + centered.y * cosR);
+  vec2 flowUV = rotated * vec2(max(0.01, u_scaleX), max(0.01, u_scaleY)) + 0.5;
+  float amount = u_warp * 0.0105;
+  float freq = 3.0;
+  for (int i = 0; i < 4; i++) {
+    float noiseVal = snoise(vec2(flowUV.x * freq + t * 0.5, flowUV.y * freq - t * 0.5));
+    float ang = noiseVal * PI * 2.0;
+    flowUV += vec2(cos(ang), sin(ang)) * amount;
+  }
+  float sharpness = mix(1.5, 3.5, clamp(u_paramB, 0.0, 1.0));
+  vec3 colAcc = vec3(0.0);
+  float alphaAcc = 0.0;
+  float weightAcc = 0.0;
+  for (int i = 0; i < ${FLOW_MAX_STOPS}; i++) {
+    if (i < u_count) {
+      float fi = float(i);
+      vec2 center = 0.5 + 0.38 * vec2(
+        sin(t * 0.8 + fi * 2.1),
+        cos(t * 0.6 + fi * 1.7)
+      );
+      float dist = length(flowUV - center);
+      float weight = 1.0 / (pow(dist, sharpness) + 0.001);
+      colAcc += u_col[i] * weight;
+      alphaAcc += u_alpha[i] * weight;
+      weightAcc += weight;
+    }
+  }
+  return vec4(colAcc / max(0.0001, weightAcc), alphaAcc / max(0.0001, weightAcc));
+}
+float fieldVortex(vec2 p, float t, int oct) {
+  vec2 c = p - 0.5;
+  c.x *= u_aspect;
+  float r = length(c);
+  float a = atan(c.y, c.x);
+  float swirl = u_warp * (1.0 - smoothstep(0.0, 0.8, r)) + u_paramA * 5.0;
+  float n = fbm(p * (1.0 + u_warp * 0.25) + vec2(0.04 * t, -0.03 * t), oct);
+  float spiral = sin(a + swirl * r * 8.0 - t + n * 2.0);
+  float rings = sin(r * mix(8.0, 26.0, u_paramB) - t * 0.8);
+  return 0.5 + 0.5 * (spiral * 0.58 + rings * 0.24 + n * 0.32);
+}
+void main(){
+  vec2 centered = v_uv - 0.5 - u_offset;
+  float cosR = cos(u_rotation);
+  float sinR = sin(u_rotation);
+  vec2 rotated = vec2(centered.x * cosR - centered.y * sinR, centered.x * sinR + centered.y * cosR);
+  vec2 p = rotated * vec2(u_scaleX, u_scaleY) + 0.5;
+  float t = u_time;
+  int oct = u_octaves;
+  if (u_algo == 7) {
+    gl_FragColor = colorLiquidSDF(v_uv, t);
+    return;
+  }
+  float f = fieldFlow(p, t, oct);
+  if (u_algo == 1) {
+    f = fieldTurbulence(p, t, oct);
+  } else if (u_algo == 2) {
+    f = fieldCurl(p, t, oct);
+  } else if (u_algo == 3) {
+    f = fieldWave(p, t);
+  } else if (u_algo == 4) {
+    f = fieldPolarWave(p, t);
+  } else if (u_algo == 5) {
+    f = fieldVoronoi(p, t, oct);
+  } else if (u_algo == 6) {
+    f = fieldMetaballs(p, t);
+  } else if (u_algo == 8) {
+    f = fieldVortex(p, t, oct);
+  }
 
   // 柔和度：压低噪声对比，弱化陡变处的硬色带，过渡更柔和（0=原始对比，1=最柔和）
   float s = clamp(u_soft, 0.0, 1.0);
@@ -312,6 +525,7 @@ type DynamicTextureCanvasProps = {
   layerId?: string;
   onFrame?: () => void;
   renderScale?: number;
+  dynamicImageAsset?: DynamicImageAsset | null;
 };
 
 function createFlowGL(): FlowGL | null {
@@ -345,9 +559,10 @@ function createFlowGL(): FlowGL | null {
     canvas, gl, program, buffer,
     aPos: gl.getAttribLocation(program, 'a_pos'),
     u: {
-      time: u('u_time'), scaleX: u('u_scaleX'), scaleY: u('u_scaleY'), rotation: u('u_rotation'),
+      time: u('u_time'), scaleX: u('u_scaleX'), scaleY: u('u_scaleY'), offset: u('u_offset'), rotation: u('u_rotation'),
       warp: u('u_warp'), soft: u('u_soft'),
       aspect: u('u_aspect'), octaves: u('u_octaves'),
+      algo: u('u_algo'), paramA: u('u_paramA'), paramB: u('u_paramB'),
       col: u('u_col[0]'), pos: u('u_pos[0]'), alpha: u('u_alpha[0]'), count: u('u_count'),
     },
     lose: gl.getExtension('WEBGL_lose_context'),
@@ -357,8 +572,10 @@ function createFlowGL(): FlowGL | null {
 function renderFlowGL(
   state: FlowGL, w: number, h: number,
   stops: { position: number; color: string; opacity: number }[],
-  scaleX: number, scaleY: number, rotation: number,
+  transform: TransformParams,
+  rotation: number,
   warp: number, softness: number, complexity: number, timeSec: number,
+  algo: number, paramA: number, paramB: number,
 ) {
   const { gl, program, buffer, canvas, u, aPos } = state;
   const maxDim = 720;
@@ -388,22 +605,93 @@ function renderFlowGL(
   gl.uniform1fv(u.alpha, alphas);
   gl.uniform1i(u.count, n);
   gl.uniform1f(u.time, timeSec);
-  gl.uniform1f(u.scaleX, scaleX);
-  gl.uniform1f(u.scaleY, scaleY);
+  gl.uniform1f(u.scaleX, transform.scale);
+  gl.uniform1f(u.scaleY, transform.scale * transform.aspectRatio);
+  gl.uniform2f(u.offset, transform.offsetX / Math.max(1, w), transform.offsetY / Math.max(1, h));
   gl.uniform1f(u.rotation, rotation * Math.PI / 180);
   gl.uniform1f(u.warp, warp);
   gl.uniform1f(u.soft, softness);
   gl.uniform1i(u.octaves, Math.max(1, Math.min(6, Math.round(complexity))));
+  gl.uniform1i(u.algo, algo);
+  gl.uniform1f(u.paramA, paramA);
+  gl.uniform1f(u.paramB, paramB);
   gl.uniform1f(u.aspect, w / h);
   gl.clearColor(0, 0, 0, 0);
   gl.clear(gl.COLOR_BUFFER_BIT);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
-function needsContinuousDraw(settings: TextureSettings, activeInteractionCount: number) {
+function drawWithTransform(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  transform: TransformParams,
+  draw: () => void,
+) {
+  const clamped = clampTransformParamsToSize(transform, width, height);
+  const centerX = width * 0.5 + clamped.offsetX;
+  const centerY = height * 0.5 + clamped.offsetY;
+  ctx.save();
+  ctx.translate(centerX, centerY);
+  ctx.scale(clamped.scale, clamped.scale * clamped.aspectRatio);
+  ctx.translate(-width * 0.5, -height * 0.5);
+  draw();
+  ctx.restore();
+}
+
+function drawStaticDynamicImage(
+  ctx: CanvasRenderingContext2D,
+  source: HTMLCanvasElement,
+  width: number,
+  height: number,
+  fit: TextureSettings['dynamicImageFit'],
+  opacity: number,
+) {
+  if (width <= 0 || height <= 0 || source.width <= 0 || source.height <= 0) return;
+  const srcW = source.width;
+  const srcH = source.height;
+  const srcAspect = srcW / srcH;
+  const dstAspect = width / height;
+  let sx = 0;
+  let sy = 0;
+  let sw = srcW;
+  let sh = srcH;
+  let dx = 0;
+  let dy = 0;
+  let dw = width;
+  let dh = height;
+
+  if (fit === 'contain') {
+    if (srcAspect > dstAspect) {
+      dh = width / srcAspect;
+      dy = (height - dh) * 0.5;
+    } else {
+      dw = height * srcAspect;
+      dx = (width - dw) * 0.5;
+    }
+  } else if (srcAspect > dstAspect) {
+    sw = srcH * dstAspect;
+    sx = (srcW - sw) * 0.5;
+  } else {
+    sh = srcW / dstAspect;
+    sy = (srcH - sh) * 0.5;
+  }
+
+  ctx.save();
+  ctx.globalAlpha = clamp01(opacity);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(source, sx, sy, sw, sh, dx, dy, dw, dh);
+  ctx.restore();
+}
+
+function needsContinuousDraw(settings: TextureSettings, activeInteractionCount: number, _hasDynamicImageSource: boolean) {
   if (!settings.enabled) return false;
   if (settings.textureType === 'gradient') {
-    return settings.animEnabled !== false && settings.gradientAnimType === 'flow';
+    return settings.animEnabled !== false && isGradientAlgorithm(settings.gradientAnimType);
+  }
+  if (settings.textureType === 'dynamicImage') {
+    return false;
   }
   return (
     settings.animEnabled !== false ||
@@ -412,7 +700,7 @@ function needsContinuousDraw(settings: TextureSettings, activeInteractionCount: 
   );
 }
 
-export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, DynamicTextureCanvasProps>(function DynamicTextureCanvas({ settings, width: outputWidth, height: outputHeight, layerId, onFrame, renderScale = 1 }, ref) {
+export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, DynamicTextureCanvasProps>(function DynamicTextureCanvas({ settings, width: outputWidth, height: outputHeight, layerId, onFrame, renderScale = 1, dynamicImageAsset = null }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const brushPreviewRef = useRef<HTMLDivElement>(null);
   const brushPreviewInnerRef = useRef<HTMLDivElement>(null);
@@ -436,10 +724,12 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
   const maskCanvasSizeRef = useRef({ width: 0, height: 0 });
   const flowGLRef = useRef<FlowGL | null>(null);
   const flowGLInitRef = useRef<boolean>(false);
+  const dynamicImageAssetRef = useRef<DynamicImageAsset | null>(dynamicImageAsset);
   const animationTimeRef = useRef<number>(0);
   const lastWallNowRef = useRef<number>(0);
   const wasAnimationRunningRef = useRef(false);
   settingsRef.current = settings;
+  dynamicImageAssetRef.current = dynamicImageAsset;
   onFrameRef.current = onFrame;
 
   const ensureSpotMaskCanvas = (width = maskCanvasSizeRef.current.width, height = maskCanvasSizeRef.current.height) => {
@@ -762,27 +1052,40 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
       const effectiveNow = animationTimeRef.current;
       const isGradientTexture = current.textureType === 'gradient';
       const isHalftoneTexture = current.textureType === 'halftone';
+      const isDynamicImageTexture = current.textureType === 'dynamicImage';
+      const textureTransform = clampTransformParamsToSize(current.transform, width, height, TRANSFORM_PARAM_BOUNDS_DEFAULT);
+      const gradientAlgoTransform = clampTransformParamsToSize(current.transform, width, height, GRADIENT_ALGO_TRANSFORM_PARAM_BOUNDS);
+      const dynamicImageSource = dynamicImageAssetRef.current?.canvas ?? null;
+      const hasDynamicImageSource = Boolean(dynamicImageSource);
 
       if (isHalftoneTexture) {
         if (!halftoneGLCanvasRef.current) halftoneGLCanvasRef.current = document.createElement('canvas');
+        const halftoneSettings = {
+          ...current,
+          spotScale: 1,
+          spotOffsetX: 0,
+          spotOffsetY: 0,
+        };
         const renderedWithWebGL = renderHalftoneWebGL(
           halftoneGLCanvasRef.current,
-          current,
+          halftoneSettings,
           width,
           height,
           effectiveNow,
           current.spotMaskEnabled ? ensureSpotMaskCanvas() : null,
         );
         if (renderedWithWebGL) {
-          ctx.save();
-          ctx.globalAlpha = 1;
-          ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = 'high';
-          ctx.drawImage(halftoneGLCanvasRef.current, 0, 0, width, height);
-          ctx.restore();
+          drawWithTransform(ctx, width, height, textureTransform, () => {
+            ctx.save();
+            ctx.globalAlpha = 1;
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(halftoneGLCanvasRef.current as HTMLCanvasElement, 0, 0, width, height);
+            ctx.restore();
+          });
           frameVersionRef.current += 1;
           onFrameRef.current?.();
-          if (needsContinuousDraw(current, interactionsRef.current.length)) {
+          if (needsContinuousDraw(current, interactionsRef.current.length, hasDynamicImageSource)) {
             scheduleDraw();
           }
           return;
@@ -792,19 +1095,20 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
       if (isGradientTexture && current.gradientStops.length >= 2) {
         const gradAnimType = current.gradientAnimType || 'none';
         let flowDrawn = false;
-        if (gradAnimType === 'flow') {
-          // 流动渐变：用 WebGL 域扭曲噪声着色器渲染到离屏画布后绘制到主画布，
-          // 复现 gradientora 背景那种平滑流动的有机渐变质感。
+        if (isGradientAlgorithm(gradAnimType)) {
+          // 动态渐变：用 WebGL 程序按算法生成标量场，再映射到用户配置的渐变色带。
           if (!flowGLInitRef.current) { flowGLInitRef.current = true; flowGLRef.current = createFlowGL(); }
           const flow = flowGLRef.current;
           if (flow) {
             const tSec = effectiveNow * 0.001 * Math.max(0.01, current.gradientAnimSpeed ?? 0.1);
+            const algoIndex = getGradientAlgorithmUniformIndex(gradAnimType);
             renderFlowGL(
               flow, width, height, current.gradientStops,
-              current.gradientFlowScaleX ?? 0.1, current.gradientFlowScaleY ?? 0.1,
+              gradientAlgoTransform,
               current.gradientFlowRotation ?? 0,
               current.gradientFlowWarp ?? 1.5,
               current.gradientFlowSoftness ?? 0.6, current.gradientFlowComplexity ?? 3, tSec,
+              algoIndex, current.gradientFlowParamA ?? 0.5, current.gradientFlowParamB ?? 0.5,
             );
             ctx.save();
             ctx.globalAlpha = 1;
@@ -816,24 +1120,24 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
           }
         }
         if (!flowDrawn) {
-          const gAngleRad = (current.gradientAngle * Math.PI) / 180;
-          const cos = Math.cos(gAngleRad);
-          const sin = Math.sin(gAngleRad);
-          const halfW = width / 2;
-          const halfH = height / 2;
-          const len = Math.abs(cos) * width + Math.abs(sin) * height;
-          const x0 = halfW - cos * len / 2;
-          const y0 = halfH - sin * len / 2;
-          const x1 = halfW + cos * len / 2;
-          const y1 = halfH + sin * len / 2;
+            const gAngleRad = (current.gradientAngle * Math.PI) / 180;
+            const cos = Math.cos(gAngleRad);
+            const sin = Math.sin(gAngleRad);
+            const halfW = width / 2;
+            const halfH = height / 2;
+            const len = Math.abs(cos) * width + Math.abs(sin) * height;
+            const x0 = halfW - cos * len / 2;
+            const y0 = halfH - sin * len / 2;
+            const x1 = halfW + cos * len / 2;
+            const y1 = halfH + sin * len / 2;
 
-          const grad = ctx.createLinearGradient(x0, y0, x1, y1);
-          for (const stop of current.gradientStops) {
-            const { r, g, b } = parseHexRgb(stop.color);
-            grad.addColorStop(stop.position, `rgba(${r},${g},${b},${stop.opacity})`);
-          }
-          ctx.fillStyle = grad;
-          ctx.fillRect(0, 0, width, height);
+            const grad = ctx.createLinearGradient(x0, y0, x1, y1);
+            for (const stop of current.gradientStops) {
+              const { r, g, b } = parseHexRgb(stop.color);
+              grad.addColorStop(stop.position, `rgba(${r},${g},${b},${stop.opacity})`);
+            }
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
         }
 
         const gFadeT = height * current.gradientFadeEdgeTop * 0.5;
@@ -863,6 +1167,21 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
         }
       }
 
+      if (isDynamicImageTexture) {
+        if (dynamicImageSource) {
+          drawWithTransform(ctx, width, height, textureTransform, () => {
+            drawStaticDynamicImage(
+              ctx,
+              dynamicImageSource,
+              width,
+              height,
+              current.dynamicImageFit,
+              current.dynamicImageOpacity,
+            );
+          });
+        }
+      }
+
       const rgb = parseHexRgb(current.dotColor);
       const spacing = current.dotSpacing;
       const interactionDuration = current.mouseInteractionDuration * 1000;
@@ -884,9 +1203,6 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
       const wrapPad = spotType === 'gaussian' ? spreadRange + 80 : Math.max(spreadRange + 80, spreadRange * 2.5);
       const wrapW = width + wrapPad * 2;
       const wrapH = height + wrapPad * 2;
-      const spotScale = Math.max(0.1, current.spotScale ?? 1);
-      const ofsX = current.spotOffsetX ?? 0;
-      const ofsY = current.spotOffsetY ?? 0;
       const coherence = current.coherence ?? 1;
       const maxDim = Math.max(width, height);
       const animType: TextureAnimType = current.animType || 'drift';
@@ -977,10 +1293,9 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
           }
         }
 
-        const cx = width / 2, cy = height / 2;
-        const x = (rawX - cx) * spotScale + cx + ofsX;
-        const y = (rawY - cy) * spotScale + cy + ofsY;
-        const radius = current.spotSize * (0.72 + seededUnit(current.seed, i * 7 + 6) * 0.62) * spotScale * radiusMul;
+        const x = rawX;
+        const y = rawY;
+        const radius = current.spotSize * (0.72 + seededUnit(current.seed, i * 7 + 6) * 0.62) * radiusMul;
         return { x, y, radius, opacity };
       }) : [];
       let spots: Spot[];
@@ -1041,7 +1356,9 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
         const blobTmp = tmpCanvasRef.current;
         if (blobTmp.width !== fw || blobTmp.height !== fh) { blobTmp.width = fw; blobTmp.height = fh; }
         blobTmp.getContext('2d')!.putImageData(fieldData, 0, 0);
-        ctx.drawImage(blobTmp, 0, 0, width, height);
+        drawWithTransform(ctx, width, height, textureTransform, () => {
+          ctx.drawImage(blobTmp, 0, 0, width, height);
+        });
         ctx.restore();
         interactionsRef.current = [];
       } else if (isHalftoneTexture) {
@@ -1265,13 +1582,15 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
         ctx.globalAlpha = 1;
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(texBuf, 0, 0, width, height);
+        drawWithTransform(ctx, width, height, textureTransform, () => {
+          ctx.drawImage(texBuf, 0, 0, width, height);
+        });
         ctx.restore();
       }
       ctx.globalAlpha = 1;
       frameVersionRef.current += 1;
       onFrameRef.current?.();
-      if (needsContinuousDraw(current, interactionsRef.current.length)) {
+      if (needsContinuousDraw(current, interactionsRef.current.length, hasDynamicImageSource)) {
         scheduleDraw();
       }
     };
@@ -1311,6 +1630,10 @@ export const DynamicTextureCanvas = forwardRef<DynamicTextureCanvasHandle, Dynam
   useEffect(() => {
     requestDeferredDrawRef.current();
   }, [settings]);
+
+  useEffect(() => {
+    requestDeferredDrawRef.current();
+  }, [dynamicImageAsset]);
 
   return (
     <>
